@@ -2,10 +2,10 @@
 name = "ark-feanor"
 version = "0.1.0"
 edition = "2021"
-authors = ["Your Name <you@example.com>"]
+authors = ["Vitor Py <vitor@vitorpy.com>"]
 license = "MIT OR Apache-2.0"
 description = "Bridge between arkworks finite fields and feanor-math ring system"
-repository = "https://github.com/yourusername/ark-feanor"
+repository = "https://github.com/vitorpy/ark-feanor"
 keywords = ["cryptography", "finite-fields", "polynomial", "groebner-basis", "arkworks"]
 categories = ["cryptography", "mathematics"]
 
