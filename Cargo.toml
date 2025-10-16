@@ -13,7 +13,7 @@ categories = ["cryptography", "mathematics"]
 ark-ff = "0.4"
 ark-bn254 = "0.4"
 ark-bls12-381 = "0.4"
-feanor-math = { version = "3.6", path = "vendor/feanor-math", features = ["unstable-enable"] }
+feanor-math = { path = "vendor/feanor-math", features = ["unstable-enable"] }
 num-bigint = "0.4"
 num-traits = "0.2"
 lazy_static = "1.4"
