@@ -176,7 +176,8 @@ impl<F: Field> ProjectionHom<F> {
 mod tests {
     use super::*;
     use ark_bls12_381::Fr;
-    
+    use ark_ff::Zero;
+
     #[test]
     fn test_frobenius_prime_field() {
         let frob = FrobeniusHom::<Fr>::standard();
@@ -185,7 +186,7 @@ mod tests {
         // In a prime field, Frobenius is identity
         assert_eq!(x, fx);
     }
-    
+
     #[test]
     fn test_zero_homomorphism() {
         let zero_hom = ZeroHom::<Fr>::new();
@@ -193,7 +194,7 @@ mod tests {
         let result = zero_hom.apply(&x);
         assert_eq!(result, Fr::zero());
     }
-    
+
     #[test]
     fn test_evaluation_homomorphism() {
         let point = Fr::from(3u64);

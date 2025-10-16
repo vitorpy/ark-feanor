@@ -120,7 +120,8 @@ pub fn biguints_to_fields<F: PrimeField>(values: &[BigUint]) -> Vec<F> {
 mod tests {
     use super::*;
     use ark_bn254::Fr;
-    
+    use num_traits::Zero;
+
     #[test]
     fn test_characteristic_extraction() {
         let char = extract_characteristic::<Fr>();

@@ -3,6 +3,8 @@
 use ark_feanor::*;
 use ark_bn254::Fr as BnFr;
 use ark_bls12_381::{Fr as BlsFr, Fq as BlsFq};
+use feanor_math::field::Field;
+use ark_ff::{Field as ArkField, One, Zero};
 
 #[test]
 fn test_ring_axioms_bn254() {
@@ -81,45 +83,45 @@ fn test_division_bls12_381() {
 
 #[test]
 fn test_powers() {
-    let field = ArkFieldWrapper::<BlsFq>::new();
-    
-    let base = field.from_int(3);
-    
+    let field_base = ArkFieldWrapper::<BlsFq>::new();
+
+    let base = BlsFq::from(3u64);
+
     // Test x^0 = 1
-    let result = field.pow(field.clone_el(&base), 0);
-    assert!(field.is_one(&result));
-    
+    let result = base.pow([0u64]);
+    assert!(result.is_one());
+
     // Test x^1 = x
-    let result = field.pow(field.clone_el(&base), 1);
-    assert!(field.eq_el(&result, &base));
-    
+    let result = base.pow([1u64]);
+    assert_eq!(result, base);
+
     // Test x^2
-    let result = field.pow(field.clone_el(&base), 2);
-    let expected = field.mul_ref(&base, &base);
-    assert!(field.eq_el(&result, &expected));
-    
+    let result = base.pow([2u64]);
+    let expected = base * base;
+    assert_eq!(result, expected);
+
     // Test x^5
-    let result = field.pow(field.clone_el(&base), 5);
-    let expected = field.from_int(243); // 3^5 = 243
-    assert!(field.eq_el(&result, &expected));
+    let result = base.pow([5u64]);
+    let expected = BlsFq::from(243u64); // 3^5 = 243
+    assert_eq!(result, expected);
 }
 
 #[test]
 fn test_characteristic() {
-    use prime_field::FieldProperties;
-    
+    use ark_feanor::prime_field::FieldProperties;
+
     let bn_field = ArkFieldWrapper::<BnFr>::new();
     let bls_field = ArkFieldWrapper::<BlsFr>::new();
-    
+
     // Get characteristics
-    let bn_char = bn_field.characteristic();
-    let bls_char = bls_field.characteristic();
-    
+    let bn_char = bn_field.field_characteristic_biguint();
+    let bls_char = bls_field.field_characteristic_biguint();
+
     // Verify they're different and non-zero
     assert!(bn_char != bls_char);
     assert!(bn_char > num_bigint::BigUint::from(0u32));
     assert!(bls_char > num_bigint::BigUint::from(0u32));
-    
+
     // Verify they're prime field
     assert!(bn_field.is_prime_field());
     assert!(bls_field.is_prime_field());

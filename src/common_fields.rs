@@ -153,6 +153,8 @@ mod tests {
     
     #[test]
     fn test_static_fields() {
+        use feanor_math::homomorphism::Homomorphism;
+
         // Access the lazy static fields
         let field = &*BN254_FR;
         let one = field.one();
