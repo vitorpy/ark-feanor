@@ -107,6 +107,8 @@ pub use common_fields::*;
 pub use conversions::{
     extract_characteristic,
     biguint_to_field,
+    bigint_to_field,
+    i64_to_field,
     field_to_biguint,
     field_to_small_int,
 };

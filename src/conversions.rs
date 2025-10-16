@@ -116,6 +116,64 @@ pub fn biguints_to_fields<F: PrimeField>(values: &[BigUint]) -> Vec<F> {
     values.iter().map(biguint_to_field).collect()
 }
 
+/// Convert an i64 to an arkworks field element
+///
+/// This properly handles both positive and negative i64 values, including i64::MIN.
+///
+/// # Example
+/// ```ignore
+/// use ark_bn254::Fr;
+/// use ark_feanor::i64_to_field;
+///
+/// let pos = i64_to_field::<Fr>(42);
+/// let neg = i64_to_field::<Fr>(-100);
+/// let min = i64_to_field::<Fr>(i64::MIN);
+/// ```
+pub fn i64_to_field<F: Field>(value: i64) -> F {
+    if value >= 0 {
+        F::from(value as u64)
+    } else {
+        // For negative values, we need to handle i64::MIN specially
+        // because -i64::MIN overflows
+        if value == i64::MIN {
+            // i64::MIN = -2^63
+            // We compute this as -(2^63) = -(2^62 * 2)
+            let two_pow_62 = F::from(1u64 << 62);
+            let two_pow_63 = two_pow_62 + two_pow_62; // 2 * 2^62 = 2^63
+            -two_pow_63
+        } else {
+            -F::from((-value) as u64)
+        }
+    }
+}
+
+/// Convert a signed BigInt to an arkworks field element
+///
+/// This performs modular reduction if the value is larger than the field modulus.
+/// Negative values are properly handled by computing the field element's additive inverse.
+///
+/// # Example
+/// ```ignore
+/// use ark_bn254::Fr;
+/// use ark_feanor::bigint_to_field;
+/// use num_bigint::BigInt;
+///
+/// let big = BigInt::from(123456789i64);
+/// let neg_big = BigInt::from(-987654321i64);
+///
+/// let pos_field = bigint_to_field::<Fr>(&big);
+/// let neg_field = bigint_to_field::<Fr>(&neg_big);
+/// ```
+pub fn bigint_to_field<F: PrimeField>(value: &BigInt) -> F {
+    let (sign, magnitude) = value.clone().into_parts();
+    let field_elem = biguint_to_field::<F>(&magnitude);
+
+    match sign {
+        num_bigint::Sign::Minus => -field_elem,
+        num_bigint::Sign::NoSign | num_bigint::Sign::Plus => field_elem,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,5 +217,112 @@ mod tests {
         let reduced = biguint_to_field::<Fr>(&large_value);
         let expected = Fr::from(7u64);
         assert_eq!(reduced, expected);
+    }
+
+    #[test]
+    fn test_i64_to_field_positive() {
+        let val = i64_to_field::<Fr>(42);
+        assert_eq!(val, Fr::from(42u64));
+
+        let large_pos = i64_to_field::<Fr>(i64::MAX);
+        assert_eq!(large_pos, Fr::from(i64::MAX as u64));
+    }
+
+    #[test]
+    fn test_i64_to_field_negative() {
+        let neg = i64_to_field::<Fr>(-100);
+        assert_eq!(neg, -Fr::from(100u64));
+
+        let neg_one = i64_to_field::<Fr>(-1);
+        assert_eq!(neg_one, -Fr::from(1u64));
+    }
+
+    #[test]
+    fn test_i64_to_field_min() {
+        // Test i64::MIN specially since it's the edge case
+        let min_val = i64_to_field::<Fr>(i64::MIN);
+
+        // Verify: i64::MIN = -2^63
+        let two_pow_62 = Fr::from(1u64 << 62);
+        let two_pow_63 = two_pow_62 + two_pow_62;
+        assert_eq!(min_val, -two_pow_63);
+
+        // Verify it adds to zero with i64::MAX + 1
+        let max_plus_one = Fr::from(i64::MAX as u64) + Fr::from(1u64);
+        assert_eq!(min_val + max_plus_one, Fr::zero());
+    }
+
+    #[test]
+    fn test_i64_to_field_zero() {
+        let zero = i64_to_field::<Fr>(0);
+        assert_eq!(zero, Fr::zero());
+    }
+
+    #[test]
+    fn test_bigint_to_field_positive() {
+        let big = BigInt::from(123456789i64);
+        let field_elem = bigint_to_field::<Fr>(&big);
+        assert_eq!(field_elem, Fr::from(123456789u64));
+    }
+
+    #[test]
+    fn test_bigint_to_field_negative() {
+        let neg_big = BigInt::from(-987654321i64);
+        let field_elem = bigint_to_field::<Fr>(&neg_big);
+        assert_eq!(field_elem, -Fr::from(987654321u64));
+    }
+
+    #[test]
+    fn test_bigint_to_field_zero() {
+        let zero = BigInt::zero();
+        let field_elem = bigint_to_field::<Fr>(&zero);
+        assert_eq!(field_elem, Fr::zero());
+    }
+
+    #[test]
+    fn test_bigint_to_field_large() {
+        // Test with a value larger than i64::MAX
+        let char = extract_characteristic::<Fr>();
+        let large = BigInt::from_bytes_le(num_bigint::Sign::Plus, &char.to_bytes_le());
+        let large_minus_one = &large - 1;
+
+        let field_elem = bigint_to_field::<Fr>(&large_minus_one);
+        // Should be p - 1, which is -1 in the field
+        assert_eq!(field_elem, -Fr::from(1u64));
+    }
+
+    #[test]
+    fn test_bigint_roundtrip() {
+        // Test that we can convert field -> biguint -> bigint -> field
+        let original = Fr::from(999999u64);
+        let as_biguint = field_to_biguint(&original);
+        let as_bigint = BigInt::from_biguint(num_bigint::Sign::Plus, as_biguint);
+        let back = bigint_to_field::<Fr>(&as_bigint);
+        assert_eq!(original, back);
+    }
+
+    #[test]
+    fn test_i64_edge_cases() {
+        // Test various edge cases
+        let cases = vec![
+            0i64,
+            1i64,
+            -1i64,
+            i64::MIN,
+            i64::MAX,
+            i64::MIN + 1,
+            i64::MAX - 1,
+        ];
+
+        for &val in &cases {
+            let field_elem = i64_to_field::<Fr>(val);
+
+            // Verify it's not zero unless val is zero
+            if val != 0 {
+                assert!(!field_elem.is_zero(), "Non-zero i64 {} should not map to zero", val);
+            } else {
+                assert!(field_elem.is_zero(), "Zero i64 should map to zero");
+            }
+        }
     }
 }
