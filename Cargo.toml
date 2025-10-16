@@ -1,0 +1,37 @@
+[package]
+name = "ark-feanor"
+version = "0.1.0"
+edition = "2021"
+authors = ["Your Name <you@example.com>"]
+license = "MIT OR Apache-2.0"
+description = "Bridge between arkworks finite fields and feanor-math ring system"
+repository = "https://github.com/yourusername/ark-feanor"
+keywords = ["cryptography", "finite-fields", "polynomial", "groebner-basis", "arkworks"]
+categories = ["cryptography", "mathematics"]
+
+[dependencies]
+ark-ff = "0.4"
+ark-bn254 = "0.4"
+ark-bls12-381 = "0.4"
+feanor-math = "3"
+num-bigint = "0.4"
+num-traits = "0.2"
+lazy_static = "1.4"
+
+[dev-dependencies]
+criterion = "0.5"
+ark-test-curves = "0.4"
+
+[features]
+default = ["std"]
+std = ["ark-ff/std", "ark-bn254/std", "ark-bls12-381/std"]
+parallel = ["ark-ff/parallel"]
+
+[[bench]]
+name = "comparison"
+harness = false
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
