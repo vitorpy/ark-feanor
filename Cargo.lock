@@ -83,7 +83,7 @@ dependencies = [
 
 [[package]]
 name = "ark-feanor"
-version = "0.2.0"
+version = "0.3.1"
 dependencies = [
  "ark-bls12-381",
  "ark-bn254",
@@ -391,8 +391,8 @@ checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 
 [[package]]
 name = "feanor-math"
-version = "3.5.9"
-source = "git+https://github.com/vitorpy/feanor-math.git?branch=stable-degree-config#a2e8feccc17bf1e737e9322f16837b0072a678fd"
+version = "3.6.0"
+source = "git+https://github.com/vitorpy/feanor-math.git?rev=8cac2e2b4dd03820dd34183fbe9f23d6df00ef63#8cac2e2b4dd03820dd34183fbe9f23d6df00ef63"
 dependencies = [
  "append-only-vec",
  "atomicbox",

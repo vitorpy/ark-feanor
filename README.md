@@ -155,6 +155,77 @@ Run benchmarks with:
 cargo bench
 ```
 
+### Memory Considerations for Large Variable Counts
+
+When working with multivariate polynomial rings with many variables (e.g., 1000+), memory usage grows exponentially due to monomial counts. The optional multiplication table in `MultivariatePolyRingImpl::new_with_mult_table()` can significantly impact memory requirements.
+
+**Key constraints:**
+
+- **Monomial count formula**: For `n` variables at degree `d`: `binomial(n + d - 1, d)`
+- **u64 indexing limit**: For 1142 variables, max degree is 7 (degree 8 exceeds 2^64)
+- **Multiplication table memory**: `Σ(lhs_deg, rhs_deg) monomials(lhs_deg) × monomials(rhs_deg) × 8 bytes`
+
+**Example: 1142 variables**
+
+| Config  | Memory   | Notes |
+|---------|----------|-------|
+| (0, 0)  | 8 B      | No multiplication table (safest) |
+| (1, 1)  | 10 MB    | Minimal caching |
+| (1, 2)  | 5.57 GB  | **Optimal for 50-100GB budgets** |
+| (0, 3)  | 1.86 GB  | Alternative lower-memory option |
+| (2, 2)  | 3.11 TB  | Impractical - exponential cliff |
+
+**Recommended configurations:**
+
+```rust
+use ark_feanor::*;
+use feanor_math::rings::multivariate::*;
+
+let field = &*BN254_FR;
+
+// Best performance within reasonable memory (5.57 GB)
+let poly_ring = MultivariatePolyRingImpl::new_with_mult_table(
+    field.clone(),
+    1142,          // variables
+    7,             // max degree (u64 limit)
+    (1, 2),        // optimal for 50-100GB budgets
+    std::alloc::Global
+);
+
+// Lower memory footprint (1.86 GB)
+let poly_ring = MultivariatePolyRingImpl::new_with_mult_table(
+    field.clone(),
+    1142,
+    7,
+    (0, 3),        // alternative if memory is tighter
+    std::alloc::Global
+);
+
+// Minimal memory, no multiplication table
+let poly_ring = MultivariatePolyRingImpl::new_with_mult_table(
+    field.clone(),
+    1142,
+    7,
+    (0, 0),        // no caching, slower but safe
+    std::alloc::Global
+);
+```
+
+**Performance vs. Memory Trade-off:**
+
+The multiplication table caches products of basis monomials. Configurations like `(1, 2)` cache products of degree-1 monomials with degree-2 monomials, speeding up polynomial multiplication at the cost of ~5-6 GB RAM.
+
+For smaller variable counts (< 100), the default configuration `(6, 8)` works well. For large constraint systems (1000+ variables), use `(1, 2)` or `(0, 0)` to avoid memory exhaustion.
+
+**Why the exponential cliff?**
+
+At degree 2 with 1142 variables: **652,653 monomials**
+
+- `(1, 2)`: 1,142 × 652,653 × 8 bytes = **5.57 GB** ✓
+- `(2, 2)`: 652,653 × 652,653 × 8 bytes = **3.11 TB** ✗
+
+The binomial coefficient growth makes degree-2 tables impractical beyond ~100 variables.
+
 ## Architecture
 
 The library is organized into several modules:

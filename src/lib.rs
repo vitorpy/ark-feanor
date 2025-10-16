@@ -54,20 +54,64 @@
 //! ```
 //! 
 //! ## Gröbner Basis Computation
-//! 
+//!
+//! ### Basic Usage
+//!
 //! ```ignore
 //! use ark_feanor::*;
-//! use feanor_math::algorithms::buchberger::*;
-//! use feanor_math::rings::multivariate::*;
-//! 
+//!
 //! let field = &*BN254_FR;
 //! let poly_ring = MultivariatePolyRingImpl::new(field, 2);
-//! 
+//!
 //! // Define your polynomial system
 //! let system = vec![/* your polynomials */];
-//! 
+//!
 //! // Compute Gröbner basis with degree reverse lexicographic ordering
 //! let gb = buchberger_simple(&poly_ring, system, DegRevLex);
+//! ```
+//!
+//! ### With Degree Limiting (Recommended for Large Systems)
+//!
+//! ```ignore
+//! use ark_feanor::*;
+//!
+//! let field = &*BN254_FR;
+//! let poly_ring = MultivariatePolyRingImpl::new(field, 64);
+//!
+//! // Configure with degree limit to avoid explosion
+//! let config = BuchbergerConfig::new()
+//!     .with_max_degree(10);  // Abort if degrees exceed 10
+//!
+//! let system = vec![/* your polynomials */];
+//!
+//! // Compute with configuration
+//! match buchberger_configured(&poly_ring, system, Lex, config) {
+//!     Ok(gb) => println!("Computed GB with {} elements", gb.len()),
+//!     Err(GBAborted::DegreeExceeded { max_degree, actual_degree }) => {
+//!         println!("Aborted: degree {} exceeded limit {}", actual_degree, max_degree);
+//!     }
+//!     Err(e) => println!("Error: {}", e),
+//! }
+//! ```
+//!
+//! ### Variable Elimination with BlockLex
+//!
+//! ```ignore
+//! use ark_feanor::*;
+//!
+//! let field = &*BN254_FR;
+//! let poly_ring = MultivariatePolyRingImpl::new(field, 65);
+//!
+//! // Eliminate first 64 variables, keep last variable
+//! let order = BlockLex::new(64);
+//! let config = BuchbergerConfig::new().with_max_degree(5);
+//!
+//! let system = vec![/* your polynomials */];
+//!
+//! // Compute elimination GB
+//! let gb = buchberger_configured(&poly_ring, system, order, config)?;
+//!
+//! // Polynomials involving only variable 64 form the elimination ideal
 //! ```
 //! 
 //! ## Type Aliases
@@ -125,11 +169,19 @@ pub use feanor_math::{
             MultivariatePolyRingStore,
             DegRevLex,
             Lex,
+            BlockLex,
         },
         poly::{
             PolyRingStore,
             dense_poly::DensePolyRing,
         },
+    },
+    algorithms::buchberger::{
+        buchberger_simple,
+        buchberger_configured,
+        buchberger_with_sugar,
+        BuchbergerConfig,
+        GBAborted,
     },
 };
 
