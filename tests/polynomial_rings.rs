@@ -105,3 +105,152 @@ fn test_common_fields() {
     let expected = bls_field.int_hom().map(200);
     assert!(bls_field.eq_el(&z, &expected));
 }
+
+// Multivariate polynomial tests
+
+#[test]
+fn test_multivariate_polynomial_creation() {
+    let field = &*BN254_FR;
+    let poly_ring = MultivariatePolyRingImpl::new(field, 2);
+
+    // Create polynomial: x^2 + xy + y^2
+    let [poly] = poly_ring.with_wrapped_indeterminates(|[x, y]| {
+        [x.clone().pow(2) + x.clone() * y.clone() + y.clone().pow(2)]
+    });
+
+    assert!(!poly_ring.is_zero(&poly));
+    // Verify this is a non-trivial polynomial
+    assert!(!poly_ring.is_one(&poly));
+}
+
+#[test]
+fn test_multivariate_polynomial_arithmetic() {
+    let field = &*BLS12_381_FR;
+    let poly_ring = MultivariatePolyRingImpl::new(field, 2);
+
+    let [p, q] = poly_ring.with_wrapped_indeterminates(|[x, y]| {
+        [
+            x.clone() + y.clone(),  // p = x + y
+            x.clone() - y.clone(),  // q = x - y
+        ]
+    });
+
+    // Test addition: (x + y) + (x - y) = 2x
+    let sum = poly_ring.add_ref(&p, &q);
+    let [expected] = poly_ring.with_wrapped_indeterminates(|[x, _y]| {
+        [x.clone() + x.clone()]
+    });
+    assert!(poly_ring.eq_el(&sum, &expected));
+
+    // Test multiplication: (x + y)(x - y) = x^2 - y^2
+    let product = poly_ring.mul_ref(&p, &q);
+    let [expected_product] = poly_ring.with_wrapped_indeterminates(|[x, y]| {
+        [x.clone().pow(2) - y.clone().pow(2)]
+    });
+    assert!(poly_ring.eq_el(&product, &expected_product));
+}
+
+#[test]
+fn test_multivariate_three_variables() {
+    let field = &*BN254_FR;
+    let poly_ring = MultivariatePolyRingImpl::new(field, 3);
+
+    // Create polynomial: xyz + x^2 + y^2 + z^2
+    let [poly] = poly_ring.with_wrapped_indeterminates(|[x, y, z]| {
+        [x.clone() * y.clone() * z.clone()
+            + x.clone().pow(2)
+            + y.clone().pow(2)
+            + z.clone().pow(2)]
+    });
+
+    assert!(!poly_ring.is_zero(&poly));
+    assert!(!poly_ring.is_one(&poly));
+
+    // Test that adding zero doesn't change the polynomial
+    let zero = poly_ring.zero();
+    let sum = poly_ring.add_ref(&poly, &zero);
+    assert!(poly_ring.eq_el(&sum, &poly));
+}
+
+#[test]
+fn test_multivariate_constant_polynomial() {
+    let field = &*BLS12_381_FR;
+    let poly_ring = MultivariatePolyRingImpl::new(field, 2);
+
+    // Test polynomial identity: (x + y) * 1 = x + y
+    let [linear] = poly_ring.with_wrapped_indeterminates(|[x, y]| {
+        [x.clone() + y.clone()]
+    });
+
+    let one = poly_ring.one();
+    let product = poly_ring.mul_ref(&one, &linear);
+    assert!(poly_ring.eq_el(&product, &linear));
+
+    // Test zero: (x + y) * 0 = 0
+    let zero = poly_ring.zero();
+    let product_with_zero = poly_ring.mul_ref(&zero, &linear);
+    assert!(poly_ring.is_zero(&product_with_zero));
+}
+
+#[test]
+fn test_multivariate_homogeneous_polynomial() {
+    let field = &*BN254_FR;
+    let poly_ring = MultivariatePolyRingImpl::new(field, 3);
+
+    // Create homogeneous polynomial of degree 2: x^2 + xy + xz + y^2 + yz + z^2
+    let [poly] = poly_ring.with_wrapped_indeterminates(|[x, y, z]| {
+        [x.clone().pow(2)
+            + x.clone() * y.clone()
+            + x.clone() * z.clone()
+            + y.clone().pow(2)
+            + y.clone() * z.clone()
+            + z.clone().pow(2)]
+    });
+
+    assert!(!poly_ring.is_zero(&poly));
+    assert!(!poly_ring.is_one(&poly));
+
+    // Verify it's a non-trivial homogeneous polynomial by checking it has multiple terms
+    let term_count = poly_ring.terms(&poly).count();
+    assert!(term_count > 1, "Should have multiple terms");
+}
+
+#[test]
+fn test_multivariate_zero_and_one() {
+    let field = &*BLS12_381_FR;
+    let poly_ring = MultivariatePolyRingImpl::new(field, 2);
+
+    let zero = poly_ring.zero();
+    let one = poly_ring.one();
+
+    assert!(poly_ring.is_zero(&zero));
+    assert!(poly_ring.is_one(&one));
+    assert!(!poly_ring.is_zero(&one));
+    assert!(!poly_ring.is_one(&zero));
+
+    // Test that 1 * p = p
+    let [p] = poly_ring.with_wrapped_indeterminates(|[x, y]| {
+        [x.clone() * y.clone().pow(2)]
+    });
+
+    let product = poly_ring.mul_ref(&one, &p);
+    assert!(poly_ring.eq_el(&product, &p));
+}
+
+#[test]
+fn test_multivariate_negation() {
+    let field = &*BN254_FR;
+    let poly_ring = MultivariatePolyRingImpl::new(field, 2);
+
+    // Create polynomial: x + y
+    let [p] = poly_ring.with_wrapped_indeterminates(|[x, y]| {
+        [x.clone() + y.clone()]
+    });
+
+    // Negate it: -(x + y) = -x - y
+    let neg_p = poly_ring.negate(poly_ring.clone_el(&p));
+
+    // Add them: should get zero
+    let sum = poly_ring.add_ref(&p, &neg_p);
+    assert!(poly_ring.is_zero(&sum));
+}
