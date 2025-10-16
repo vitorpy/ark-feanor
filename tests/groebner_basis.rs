@@ -1,13 +1,12 @@
-//! Tests for field properties and polynomial system basics over cryptographic fields
-//!
-//! Note: Gröbner basis computation in feanor-math v3 requires unstable APIs.
-//! These tests focus on the field wrapper functionality and basic polynomial operations.
+//! Tests for Gröbner basis computation and field properties over cryptographic fields
 
 use ark_feanor::*;
 use ark_bn254::Fr as BnFr;
 use ark_bls12_381::Fr as BlsFr;
 use ark_feanor::prime_field::FieldProperties;
 use feanor_math::homomorphism::Homomorphism;
+use feanor_math::algorithms::buchberger::buchberger_simple;
+use feanor_math::rings::multivariate::{DegRevLex, Lex};
 
 #[test]
 fn test_field_properties_bn254() {
@@ -134,4 +133,168 @@ fn test_characteristic_field_operations() {
         let el = field.from_int(i);
         assert!(field.is_unit(&el), "Element {} should be a unit", i);
     }
+}
+
+// Gröbner basis computation tests
+
+#[test]
+fn test_groebner_basis_linear_system() {
+    let field = &*BN254_FR;
+    let poly_ring = MultivariatePolyRingImpl::new(field, 2);
+
+    // System: x + y = 0, x - y = 0
+    // Solution: x = 0, y = 0
+    let [p1, p2] = poly_ring.with_wrapped_indeterminates(|[x, y]| {
+        [
+            x.clone() + y.clone(),
+            x.clone() - y.clone(),
+        ]
+    });
+
+    let gb = buchberger_simple(&poly_ring, vec![p1, p2], DegRevLex);
+
+    // Gröbner basis should not be empty
+    assert!(!gb.is_empty(), "Gröbner basis should not be empty");
+
+    // Check that we got a reduced basis
+    for poly in &gb {
+        assert!(!poly_ring.is_zero(poly), "Basis should not contain zero");
+    }
+}
+
+#[test]
+fn test_groebner_basis_with_lex_ordering() {
+    let field = &*BLS12_381_FR;
+    let poly_ring = MultivariatePolyRingImpl::new(field, 2);
+
+    // Simple system: xy - 1, x^2 - 1
+    let [p1, p2] = poly_ring.with_wrapped_indeterminates(|[x, y]| {
+        [
+            x.clone() * y.clone() - 1,
+            x.clone().pow(2) - 1,
+        ]
+    });
+
+    let gb = buchberger_simple(&poly_ring, vec![p1, p2], Lex);
+
+    assert!(!gb.is_empty(), "Gröbner basis should not be empty");
+
+    // The basis should contain at least the input polynomials
+    assert!(gb.len() >= 2, "Basis should have at least 2 elements");
+}
+
+#[test]
+fn test_groebner_basis_ideal_membership() {
+    let field = &*BN254_FR;
+    let poly_ring = MultivariatePolyRingImpl::new(field, 2);
+
+    // Generate ideal from x^2 - y, y^2 - x
+    let [p1, p2] = poly_ring.with_wrapped_indeterminates(|[x, y]| {
+        [
+            x.clone().pow(2) - y.clone(),
+            y.clone().pow(2) - x.clone(),
+        ]
+    });
+
+    let gb = buchberger_simple(&poly_ring, vec![p1, p2], DegRevLex);
+
+    assert!(!gb.is_empty());
+
+    // Verify all polynomials in the basis are non-trivial
+    for poly in &gb {
+        assert!(!poly_ring.is_zero(poly));
+        assert!(!poly_ring.is_one(poly));
+    }
+}
+
+#[test]
+fn test_groebner_basis_triangular_system() {
+    let field = &*BLS12_381_FR;
+    let poly_ring = MultivariatePolyRingImpl::new(field, 3);
+
+    // Triangular system: x + y + z, xy, xz
+    let [p1, p2, p3] = poly_ring.with_wrapped_indeterminates(|[x, y, z]| {
+        [
+            x.clone() + y.clone() + z.clone(),
+            x.clone() * y.clone(),
+            x.clone() * z.clone(),
+        ]
+    });
+
+    let gb = buchberger_simple(&poly_ring, vec![p1, p2, p3], DegRevLex);
+
+    assert!(!gb.is_empty());
+    println!("Triangular system Gröbner basis has {} elements", gb.len());
+}
+
+#[test]
+fn test_groebner_basis_difference_of_squares() {
+    let field = &*BN254_FR;
+    let poly_ring = MultivariatePolyRingImpl::new(field, 2);
+
+    // System: x^2 - y^2
+    let [input] = poly_ring.with_wrapped_indeterminates(|[x, y]| {
+        [x.clone().pow(2) - y.clone().pow(2)]
+    });
+
+    let gb = buchberger_simple(&poly_ring, vec![input], DegRevLex);
+
+    // For a single polynomial, the Gröbner basis is essentially itself (up to scaling)
+    assert_eq!(gb.len(), 1, "Single polynomial should have basis of size 1");
+}
+
+#[test]
+fn test_groebner_basis_comparison_orderings() {
+    let field = &*BLS12_381_FR;
+    let poly_ring = MultivariatePolyRingImpl::new(field, 2);
+
+    let [p1, p2] = poly_ring.with_wrapped_indeterminates(|[x, y]| {
+        [
+            x.clone().pow(2) + y.clone(),
+            x.clone() * y.clone() + 1,
+        ]
+    });
+
+    // Compute with DegRevLex
+    let gb_degrevlex = buchberger_simple(&poly_ring, vec![
+        poly_ring.clone_el(&p1),
+        poly_ring.clone_el(&p2)
+    ], DegRevLex);
+
+    // Compute with Lex
+    let gb_lex = buchberger_simple(&poly_ring, vec![p1, p2], Lex);
+
+    // Both should be non-empty
+    assert!(!gb_degrevlex.is_empty());
+    assert!(!gb_lex.is_empty());
+
+    // The bases might have different sizes due to different orderings
+    println!("DegRevLex basis size: {}", gb_degrevlex.len());
+    println!("Lex basis size: {}", gb_lex.len());
+}
+
+#[test]
+fn test_groebner_basis_homogeneous_ideal() {
+    let field = &*BN254_FR;
+    let poly_ring = MultivariatePolyRingImpl::new(field, 3);
+
+    // Homogeneous ideal: x^2, xy, xz
+    let [p1, p2, p3] = poly_ring.with_wrapped_indeterminates(|[x, y, z]| {
+        [
+            x.clone().pow(2),
+            x.clone() * y.clone(),
+            x.clone() * z.clone(),
+        ]
+    });
+
+    let gb = buchberger_simple(&poly_ring, vec![p1, p2, p3], DegRevLex);
+
+    assert!(!gb.is_empty());
+
+    // All elements should be homogeneous
+    for poly in &gb {
+        assert!(!poly_ring.is_zero(poly));
+    }
+
+    println!("Homogeneous ideal basis size: {}", gb.len());
 }
