@@ -1,203 +1,156 @@
-//! Example of solving polynomial systems over cryptographic fields
+//! Example of polynomial operations over cryptographic fields
+//!
+//! Note: Gröbner basis computation in feanor-math v3 requires unstable APIs.
+//! This example demonstrates univariate polynomial operations instead.
 
 use ark_feanor::*;
-use feanor_math::algorithms::buchberger::*;
-use feanor_math::rings::multivariate::*;
-use std::time::Instant;
+use feanor_math::rings::poly::dense_poly::DensePolyRing;
+use feanor_math::rings::poly::PolyRingStore;
+use feanor_math::homomorphism::Homomorphism;
 
 fn main() {
-    println!("=== Polynomial System Solver ===\n");
-    
-    example_linear_system();
-    println!("\n" + "=".repeat(50) + "\n");
-    example_circle_parabola();
-    println!("\n" + "=".repeat(50) + "\n");
-    example_three_variables();
+    println!("=== Polynomial Operations over Cryptographic Fields ===\n");
+
+    example_polynomial_division();
+    println!("\n{}\n", "=".repeat(60));
+    example_polynomial_evaluation();
+    println!("\n{}\n", "=".repeat(60));
+    example_polynomial_composition();
 }
 
-/// Solve a simple linear system
-fn example_linear_system() {
-    println!("Example 1: Linear System over BN254_Fr");
-    println!("----------------------------------------");
-    
+/// Divide polynomials and verify factorizations
+fn example_polynomial_division() {
+    println!("Example 1: Polynomial Division over BN254 Fr");
+    println!("---------------------------------------------");
+
     let field = &*BN254_FR;
-    let poly_ring = MultivariatePolyRingImpl::new(field, 2);
-    
-    // System:
-    // 2x + 3y = 7
-    // x - y = 1
-    // Solution: x = 2, y = 1
-    let system = poly_ring.with_wrapped_indeterminates(|[x, y]| {
-        vec![
-            2 * x.clone() + 3 * y.clone() - 7,
-            x.clone() - y.clone() - 1,
-        ]
-    });
-    
-    println!("System of equations:");
-    println!("  2x + 3y - 7 = 0");
-    println!("  x - y - 1 = 0");
+    let poly_ring = DensePolyRing::new(field, "x");
+
+    // Create p(x) = x² - 5x + 6 = (x - 2)(x - 3)
+    let p = poly_ring.from_terms([
+        (field.int_hom().map(6), 0),
+        (field.negate(field.int_hom().map(5)), 1),
+        (field.one(), 2),
+    ].iter().cloned());
+
+    // Create factor q(x) = x - 2
+    let q = poly_ring.from_terms([
+        (field.negate(field.int_hom().map(2)), 0),
+        (field.one(), 1),
+    ].iter().cloned());
+
+    println!("p(x) = x² - 5x + 6 = (x - 2)(x - 3)");
+    println!("q(x) = x - 2");
     println!();
-    
-    let start = Instant::now();
-    match buchberger(&poly_ring, system, Lex, |_| {}) {
-        Ok(gb) => {
-            let elapsed = start.elapsed();
-            println!("Gröbner basis computed in {:?}", elapsed);
-            println!("Number of polynomials in basis: {}", gb.len());
-            
-            // In a linear system with Lex ordering, we often get
-            // polynomials like "y - 1" and "x - 2"
-            for poly in &gb {
-                let terms: Vec<_> = poly_ring.terms(poly).collect();
-                if terms.len() <= 2 {
-                    println!("  Potential solution polynomial found");
-                }
-            }
+
+    // Verify division
+    use feanor_math::divisibility::DivisibilityRingStore;
+    if let Some(quotient) = poly_ring.checked_div(&p, &q) {
+        println!("✓ q(x) divides p(x)");
+        println!("Quotient degree: {}", poly_ring.degree(&quotient).unwrap_or(0));
+        println!("Expected: degree 1 (should be x - 3)");
+
+        // Verify by multiplication
+        let product = poly_ring.mul_ref(&q, &quotient);
+        if poly_ring.eq_el(&product, &p) {
+            println!("✓ Verified: q(x) * quotient = p(x)");
         }
-        Err(e) => println!("Error: {:?}", e),
+    } else {
+        println!("✗ Division failed");
     }
 }
 
-/// Solve the intersection of a circle and parabola
-fn example_circle_parabola() {
-    println!("Example 2: Circle-Parabola Intersection over BLS12-381_Fr");
-    println!("----------------------------------------------------------");
-    
+/// Evaluate polynomials at specific points
+fn example_polynomial_evaluation() {
+    println!("Example 2: Polynomial Evaluation over BLS12-381 Fr");
+    println!("--------------------------------------------------");
+
     let field = &*BLS12_381_FR;
-    let poly_ring = MultivariatePolyRingImpl::new(field, 2);
-    
-    // System:
-    // x² + y² = 4  (circle with radius 2)
-    // y = x²       (parabola)
-    let system = poly_ring.with_wrapped_indeterminates(|[x, y]| {
-        vec![
-            x.clone().pow(2) + y.clone().pow(2) - 4,
-            y.clone() - x.clone().pow(2),
-        ]
-    });
-    
-    println!("System of equations:");
-    println!("  x² + y² - 4 = 0  (circle)");
-    println!("  y - x² = 0        (parabola)");
+    let poly_ring = DensePolyRing::new(field, "x");
+
+    // Create p(x) = x³ - 6x² + 11x - 6 = (x-1)(x-2)(x-3)
+    let p = poly_ring.from_terms([
+        (field.negate(field.int_hom().map(6)), 0),
+        (field.int_hom().map(11), 1),
+        (field.negate(field.int_hom().map(6)), 2),
+        (field.one(), 3),
+    ].iter().cloned());
+
+    println!("p(x) = x³ - 6x² + 11x - 6");
+    println!("Roots: x = 1, 2, 3");
     println!();
-    
-    // Try with different monomial orderings
-    for (name, ordering) in &[("Lex", Lex), ("DegRevLex", DegRevLex)] {
-        println!("Using {} ordering:", name);
-        let start = Instant::now();
-        
-        match buchberger(&poly_ring, system.clone(), *ordering, |_| {}) {
-            Ok(gb) => {
-                let elapsed = start.elapsed();
-                println!("  Computed in {:?}", elapsed);
-                println!("  Basis size: {}", gb.len());
-                
-                // Check if system is consistent
-                if gb.len() == 1 && poly_ring.is_one(&gb[0]) {
-                    println!("  System is INCONSISTENT (no solutions)");
-                } else {
-                    println!("  System may have solutions");
-                    
-                    // Look for univariate polynomials in the basis
-                    for poly in &gb {
-                        if is_univariate(&poly_ring, poly) {
-                            println!("    Found univariate polynomial (can solve directly)");
-                        }
-                    }
-                }
-            }
-            Err(e) => println!("  Error: {:?}", e),
-        }
-        println!();
+
+    // Evaluate at the roots
+    println!("Evaluating polynomial:");
+    for i in 1..=5 {
+        let x = field.int_hom().map(i);
+        let result = poly_ring.evaluate(&p, &x, &field.identity());
+
+        let is_root = field.is_zero(&result);
+        let status = if is_root { "✓ ROOT" } else { "  " };
+
+        println!("  p({}) = {} {}", i, field.format(&result), status);
     }
+    println!();
+
+    // Show degree properties
+    let degree = poly_ring.degree(&p).unwrap();
+    println!("Properties:");
+    println!("  Degree: {}", degree);
+    println!("  Leading coefficient: {}", field.format(poly_ring.lc(&p).unwrap()));
 }
 
-/// Solve a system with three variables
-fn example_three_variables() {
-    println!("Example 3: Three-Variable System over BN254_Fr");
+/// Compose polynomials
+fn example_polynomial_composition() {
+    println!("Example 3: Polynomial Composition over BN254 Fr");
     println!("-----------------------------------------------");
-    
-    let field = &*BN254_FR;
-    let poly_ring = MultivariatePolyRingImpl::new(field, 3);
-    
-    // System of symmetric polynomials
-    // x + y + z = 6
-    // xy + yz + xz = 11
-    // xyz = 6
-    // (Solution: permutations of {1, 2, 3})
-    let system = poly_ring.with_wrapped_indeterminates(|[x, y, z]| {
-        vec![
-            x.clone() + y.clone() + z.clone() - 6,
-            x.clone() * y.clone() + y.clone() * z.clone() + x.clone() * z.clone() - 11,
-            x.clone() * y.clone() * z.clone() - 6,
-        ]
-    });
-    
-    println!("System of equations (symmetric polynomials):");
-    println!("  x + y + z = 6");
-    println!("  xy + yz + xz = 11");
-    println!("  xyz = 6");
-    println!();
-    println!("Expected solutions: permutations of {{1, 2, 3}}");
-    println!();
-    
-    let start = Instant::now();
-    match buchberger(&poly_ring, system, DegRevLex, |step| {
-        if step % 10 == 0 {
-            print!(".");
-            use std::io::{self, Write};
-            io::stdout().flush().unwrap();
-        }
-    }) {
-        Ok(gb) => {
-            println!();
-            let elapsed = start.elapsed();
-            println!("Gröbner basis computed in {:?}", elapsed);
-            println!("Basis contains {} polynomials", gb.len());
-            
-            // Analyze the structure of the basis
-            let mut min_terms = usize::MAX;
-            let mut max_degree = 0;
-            
-            for poly in &gb {
-                let terms: Vec<_> = poly_ring.terms(poly).collect();
-                min_terms = min_terms.min(terms.len());
-                
-                for (_, monomial) in &terms {
-                    max_degree = max_degree.max(monomial.total_degree());
-                }
-            }
-            
-            println!("Basis analysis:");
-            println!("  Minimum terms in a polynomial: {}", min_terms);
-            println!("  Maximum total degree: {}", max_degree);
-            
-            if min_terms == 1 {
-                println!("  Note: Found constant polynomial(s)");
-            }
-        }
-        Err(e) => println!("Error computing basis: {:?}", e),
-    }
-}
 
-/// Check if a polynomial is univariate (involves only one variable)
-fn is_univariate<R: MultivariatePolyRingStore>(
-    ring: &R,
-    poly: &R::Element
-) -> bool
-where
-    R::Type: MultivariatePolyRing,
-{
-    let mut active_vars = vec![false; ring.variable_count()];
-    
-    for (_, monomial) in ring.terms(poly) {
-        for (i, &exp) in monomial.exponents().iter().enumerate() {
-            if exp > 0 {
-                active_vars[i] = true;
-            }
-        }
+    let field = &*BN254_FR;
+    let poly_ring = DensePolyRing::new(field, "x");
+
+    // f(x) = x² + 1
+    let f = poly_ring.from_terms([
+        (field.one(), 0),
+        (field.one(), 2),
+    ].iter().cloned());
+
+    // g(x) = x + 2
+    let g = poly_ring.from_terms([
+        (field.int_hom().map(2), 0),
+        (field.one(), 1),
+    ].iter().cloned());
+
+    println!("f(x) = x² + 1");
+    println!("g(x) = x + 2");
+    println!();
+
+    // Compute f(g(x)) = (x + 2)² + 1 = x² + 4x + 5
+    let composition = poly_ring.evaluate(&f, &g, &poly_ring.inclusion());
+
+    println!("Computing f(g(x)):");
+    println!("  f(g(x)) = f(x + 2) = (x + 2)² + 1");
+    println!("  Expected: x² + 4x + 5");
+    println!();
+
+    let degree = poly_ring.degree(&composition).unwrap();
+    println!("Result degree: {}", degree);
+
+    // Verify by evaluating at a point
+    let test_point = field.int_hom().map(3);
+    let direct = poly_ring.evaluate(&composition, &test_point, &field.identity());
+
+    // f(g(3)) = f(5) = 25 + 1 = 26
+    let g_at_3 = poly_ring.evaluate(&g, &test_point, &field.identity());
+    let expected = poly_ring.evaluate(&f, &g_at_3, &field.identity());
+
+    println!("Verification at x = 3:");
+    println!("  f(g(3)) = {} (direct evaluation)", field.format(&direct));
+    println!("  f(g(3)) = {} (step-by-step)", field.format(&expected));
+
+    if field.eq_el(&direct, &expected) {
+        println!("  ✓ Composition correct");
     }
-    
-    active_vars.iter().filter(|&&v| v).count() == 1
+
+    println!();
+    println!("Polynomial operations completed successfully!");
 }

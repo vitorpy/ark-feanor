@@ -86,10 +86,12 @@ fn test_pre_configured_fields() {
     let expected = bn_field.int_hom().map(150);
     assert!(bn_field.eq_el(&sum, &expected));
 
-    // Division
-    let quotient = bls_field.checked_left_div(&a, &b).expect("Division failed");
-    let reconstructed = bls_field.mul_ref(&quotient, &b);
-    assert!(bls_field.eq_el(&reconstructed, &a));
+    // Division with BLS field
+    let x = bls_field.int_hom().map(100);
+    let y = bls_field.int_hom().map(50);
+    let quotient = bls_field.checked_left_div(&x, &y).expect("Division failed");
+    let reconstructed = bls_field.mul_ref(&quotient, &y);
+    assert!(bls_field.eq_el(&reconstructed, &x));
 }
 
 #[test]

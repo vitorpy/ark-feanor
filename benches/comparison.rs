@@ -2,34 +2,36 @@
 
 use ark_bn254::Fr;
 use ark_feanor::ArkFieldWrapper;
-use ark_ff::Field;
+use ark_ff::{Field, One};
 use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
 use feanor_math::ring::*;
+use feanor_math::homomorphism::Homomorphism;
+use feanor_math::field::Field as FeanorField;
 
 fn bench_arkworks_addition(c: &mut Criterion) {
     let mut group = c.benchmark_group("addition");
-    
+
     // Native arkworks
-    group.bench_function("arkworks_native", |b| {
+    group.bench_function("arkworks_native", |bencher| {
         let a = Fr::from(12345u64);
         let b = Fr::from(67890u64);
-        b.iter(|| {
+        bencher.iter(|| {
             let c = black_box(a) + black_box(b);
             black_box(c)
         })
     });
-    
+
     // Through wrapper
-    group.bench_function("ark_feanor_wrapper", |b| {
+    group.bench_function("ark_feanor_wrapper", |bencher| {
         let field = ArkFieldWrapper::<Fr>::new();
         let a = field.from_int(12345);
         let b = field.from_int(67890);
-        b.iter(|| {
+        bencher.iter(|| {
             let c = field.add_ref(&black_box(a), &black_box(b));
             black_box(c)
         })
     });
-    
+
     group.finish();
 }
 
@@ -154,8 +156,8 @@ fn bench_power_operations(c: &mut Criterion) {
             BenchmarkId::new("ark_feanor_wrapper", exp),
             exp,
             |b, &exp| {
-                let field = ArkFieldWrapper::<Fr>::new();
-                let base = field.from_int(3);
+                let field = RingValue::from(ArkFieldWrapper::<Fr>::new());
+                let base = field.int_hom().map(3);
                 b.iter(|| {
                     let result = field.pow(black_box(base), exp as usize);
                     black_box(result)

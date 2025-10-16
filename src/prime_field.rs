@@ -132,6 +132,8 @@ impl<F: PrimeField> FieldProperties for ArkFieldWrapper<F> {
 mod tests {
     use super::*;
     use ark_bls12_381::Fr;
+    use feanor_math::ring::RingBase;
+    use feanor_math::field::Field;
 
     #[test]
     fn test_division() {

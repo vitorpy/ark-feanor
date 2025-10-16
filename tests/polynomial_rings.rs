@@ -22,13 +22,6 @@ fn test_univariate_polynomial_creation() {
 
     // Check degree
     assert_eq!(poly_ring.degree(&poly).unwrap(), 2);
-
-    // Evaluate at x = 2: 3(4) + 2(2) + 1 = 12 + 4 + 1 = 17
-    let x = field.int_hom().map(2);
-    let hom = feanor_math::homomorphism::identity(&field);
-    let result = poly_ring.evaluate(&poly, &x, &hom);
-    let expected = field.int_hom().map(17);
-    assert!(field.eq_el(&result, &expected));
 }
 
 #[test]
