@@ -1,3 +1,4 @@
 [submodule "vendor/feanor-math"]
 	path = vendor/feanor-math
 	url = https://github.com/vitorpy/feanor-math.git
+	branch = stable-degree-config
