@@ -1,11 +1,15 @@
 // Integration test for Phase 2 feanor-math features exposed through ark-feanor
 use ark_feanor::*;
+use feanor_math::rings::multivariate::multivariate_impl::{DegreeCfg, MultivariatePolyRingImpl};
+use std::alloc::Global;
 
 #[test]
 fn test_buchberger_configured_with_degree_limit() {
     // Test that BuchbergerConfig and buchberger_configured are accessible
     let field = &*BN254_FR;
-    let poly_ring = MultivariatePolyRingImpl::new(field, 3);
+    // Use low-precompute configuration to minimize memory usage
+    let degree_cfg = DegreeCfg::new(64).with_precompute(1);
+    let poly_ring = MultivariatePolyRingImpl::new_with_mult_table_ex(field, 3, degree_cfg, (1, 1), Global);
 
     // Create a simple polynomial system: x^2 - 1, y^2 - 1
     let [p1, p2] = poly_ring.with_wrapped_indeterminates(|[x, y, _z]| {
@@ -32,7 +36,8 @@ fn test_buchberger_configured_with_degree_limit() {
 fn test_degree_limit_abortion() {
     // Test that degree limiting properly aborts
     let field = &*BN254_FR;
-    let poly_ring = MultivariatePolyRingImpl::new(field, 2);
+    let degree_cfg = DegreeCfg::new(64).with_precompute(1);
+    let poly_ring = MultivariatePolyRingImpl::new_with_mult_table_ex(field, 2, degree_cfg, (1, 1), Global);
 
     // Create a system that will grow in degree during S-polynomial reduction
     // x^2 + y and x + y^2 will create cross products of degree 3 during Buchberger
@@ -71,7 +76,8 @@ fn test_degree_limit_abortion() {
 fn test_blocklex_elimination() {
     // Test that BlockLex ordering is accessible and works
     let field = &*BN254_FR;
-    let poly_ring = MultivariatePolyRingImpl::new(field, 3);
+    let degree_cfg = DegreeCfg::new(64).with_precompute(1);
+    let poly_ring = MultivariatePolyRingImpl::new_with_mult_table_ex(field, 3, degree_cfg, (1, 1), Global);
 
     // Create a system where we want to eliminate the first variable
     let [p1, p2] = poly_ring.with_wrapped_indeterminates(|[x, y, z]| {
@@ -98,7 +104,8 @@ fn test_blocklex_elimination() {
 fn test_buchberger_with_sugar() {
     // Test that buchberger_with_sugar is accessible
     let field = &*BN254_FR;
-    let poly_ring = MultivariatePolyRingImpl::new(field, 2);
+    let degree_cfg = DegreeCfg::new(64).with_precompute(1);
+    let poly_ring = MultivariatePolyRingImpl::new_with_mult_table_ex(field, 2, degree_cfg, (1, 1), Global);
 
     // Create a simple system
     let [p1, p2] = poly_ring.with_wrapped_indeterminates(|[x, y]| {

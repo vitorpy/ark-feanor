@@ -6,6 +6,8 @@ use ark_bls12_381::Fr as BlsFr;
 use feanor_math::rings::poly::dense_poly::DensePolyRing;
 use feanor_math::rings::poly::PolyRingStore;
 use feanor_math::homomorphism::Homomorphism;
+use feanor_math::rings::multivariate::multivariate_impl::{DegreeCfg, MultivariatePolyRingImpl};
+use std::alloc::Global;
 
 #[test]
 fn test_univariate_polynomial_creation() {
@@ -111,7 +113,8 @@ fn test_common_fields() {
 #[test]
 fn test_multivariate_polynomial_creation() {
     let field = &*BN254_FR;
-    let poly_ring = MultivariatePolyRingImpl::new(field, 2);
+    let degree_cfg = DegreeCfg::new(32).with_precompute(1);
+    let poly_ring = MultivariatePolyRingImpl::new_with_mult_table_ex(field, 2, degree_cfg, (1, 1), Global);
 
     // Create polynomial: x^2 + xy + y^2
     let [poly] = poly_ring.with_wrapped_indeterminates(|[x, y]| {
@@ -126,7 +129,8 @@ fn test_multivariate_polynomial_creation() {
 #[test]
 fn test_multivariate_polynomial_arithmetic() {
     let field = &*BLS12_381_FR;
-    let poly_ring = MultivariatePolyRingImpl::new(field, 2);
+    let degree_cfg = DegreeCfg::new(32).with_precompute(1);
+    let poly_ring = MultivariatePolyRingImpl::new_with_mult_table_ex(field, 2, degree_cfg, (1, 1), Global);
 
     let [p, q] = poly_ring.with_wrapped_indeterminates(|[x, y]| {
         [
@@ -153,7 +157,8 @@ fn test_multivariate_polynomial_arithmetic() {
 #[test]
 fn test_multivariate_three_variables() {
     let field = &*BN254_FR;
-    let poly_ring = MultivariatePolyRingImpl::new(field, 3);
+    let degree_cfg = DegreeCfg::new(32).with_precompute(1);
+    let poly_ring = MultivariatePolyRingImpl::new_with_mult_table_ex(field, 3, degree_cfg, (1, 1), Global);
 
     // Create polynomial: xyz + x^2 + y^2 + z^2
     let [poly] = poly_ring.with_wrapped_indeterminates(|[x, y, z]| {
@@ -175,7 +180,8 @@ fn test_multivariate_three_variables() {
 #[test]
 fn test_multivariate_constant_polynomial() {
     let field = &*BLS12_381_FR;
-    let poly_ring = MultivariatePolyRingImpl::new(field, 2);
+    let degree_cfg = DegreeCfg::new(32).with_precompute(1);
+    let poly_ring = MultivariatePolyRingImpl::new_with_mult_table_ex(field, 2, degree_cfg, (1, 1), Global);
 
     // Test polynomial identity: (x + y) * 1 = x + y
     let [linear] = poly_ring.with_wrapped_indeterminates(|[x, y]| {
@@ -195,7 +201,8 @@ fn test_multivariate_constant_polynomial() {
 #[test]
 fn test_multivariate_homogeneous_polynomial() {
     let field = &*BN254_FR;
-    let poly_ring = MultivariatePolyRingImpl::new(field, 3);
+    let degree_cfg = DegreeCfg::new(32).with_precompute(1);
+    let poly_ring = MultivariatePolyRingImpl::new_with_mult_table_ex(field, 3, degree_cfg, (1, 1), Global);
 
     // Create homogeneous polynomial of degree 2: x^2 + xy + xz + y^2 + yz + z^2
     let [poly] = poly_ring.with_wrapped_indeterminates(|[x, y, z]| {
@@ -218,7 +225,8 @@ fn test_multivariate_homogeneous_polynomial() {
 #[test]
 fn test_multivariate_zero_and_one() {
     let field = &*BLS12_381_FR;
-    let poly_ring = MultivariatePolyRingImpl::new(field, 2);
+    let degree_cfg = DegreeCfg::new(32).with_precompute(1);
+    let poly_ring = MultivariatePolyRingImpl::new_with_mult_table_ex(field, 2, degree_cfg, (1, 1), Global);
 
     let zero = poly_ring.zero();
     let one = poly_ring.one();

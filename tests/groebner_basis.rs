@@ -7,6 +7,8 @@ use ark_feanor::prime_field::FieldProperties;
 use feanor_math::homomorphism::Homomorphism;
 use feanor_math::algorithms::buchberger::buchberger_simple;
 use feanor_math::rings::multivariate::{DegRevLex, Lex};
+use feanor_math::rings::multivariate::multivariate_impl::{DegreeCfg, MultivariatePolyRingImpl};
+use std::alloc::Global;
 
 #[test]
 fn test_field_properties_bn254() {
@@ -140,7 +142,8 @@ fn test_characteristic_field_operations() {
 #[test]
 fn test_groebner_basis_linear_system() {
     let field = &*BN254_FR;
-    let poly_ring = MultivariatePolyRingImpl::new(field, 2);
+    let degree_cfg = DegreeCfg::new(64).with_precompute(1);
+    let poly_ring = MultivariatePolyRingImpl::new_with_mult_table_ex(field, 2, degree_cfg, (1, 1), Global);
 
     // System: x + y = 0, x - y = 0
     // Solution: x = 0, y = 0
@@ -165,7 +168,8 @@ fn test_groebner_basis_linear_system() {
 #[test]
 fn test_groebner_basis_with_lex_ordering() {
     let field = &*BLS12_381_FR;
-    let poly_ring = MultivariatePolyRingImpl::new(field, 2);
+    let degree_cfg = DegreeCfg::new(64).with_precompute(1);
+    let poly_ring = MultivariatePolyRingImpl::new_with_mult_table_ex(field, 2, degree_cfg, (1, 1), Global);
 
     // Simple system: xy - 1, x^2 - 1
     let [p1, p2] = poly_ring.with_wrapped_indeterminates(|[x, y]| {
@@ -210,7 +214,8 @@ fn test_groebner_basis_ideal_membership() {
 #[test]
 fn test_groebner_basis_triangular_system() {
     let field = &*BLS12_381_FR;
-    let poly_ring = MultivariatePolyRingImpl::new(field, 3);
+    let degree_cfg = DegreeCfg::new(64).with_precompute(1);
+    let poly_ring = MultivariatePolyRingImpl::new_with_mult_table_ex(field, 3, degree_cfg, (1, 1), Global);
 
     // Triangular system: x + y + z, xy, xz
     let [p1, p2, p3] = poly_ring.with_wrapped_indeterminates(|[x, y, z]| {
@@ -230,7 +235,8 @@ fn test_groebner_basis_triangular_system() {
 #[test]
 fn test_groebner_basis_difference_of_squares() {
     let field = &*BN254_FR;
-    let poly_ring = MultivariatePolyRingImpl::new(field, 2);
+    let degree_cfg = DegreeCfg::new(64).with_precompute(1);
+    let poly_ring = MultivariatePolyRingImpl::new_with_mult_table_ex(field, 2, degree_cfg, (1, 1), Global);
 
     // System: x^2 - y^2
     let [input] = poly_ring.with_wrapped_indeterminates(|[x, y]| {
@@ -246,7 +252,8 @@ fn test_groebner_basis_difference_of_squares() {
 #[test]
 fn test_groebner_basis_comparison_orderings() {
     let field = &*BLS12_381_FR;
-    let poly_ring = MultivariatePolyRingImpl::new(field, 2);
+    let degree_cfg = DegreeCfg::new(64).with_precompute(1);
+    let poly_ring = MultivariatePolyRingImpl::new_with_mult_table_ex(field, 2, degree_cfg, (1, 1), Global);
 
     let [p1, p2] = poly_ring.with_wrapped_indeterminates(|[x, y]| {
         [
@@ -276,7 +283,8 @@ fn test_groebner_basis_comparison_orderings() {
 #[test]
 fn test_groebner_basis_homogeneous_ideal() {
     let field = &*BN254_FR;
-    let poly_ring = MultivariatePolyRingImpl::new(field, 3);
+    let degree_cfg = DegreeCfg::new(64).with_precompute(1);
+    let poly_ring = MultivariatePolyRingImpl::new_with_mult_table_ex(field, 3, degree_cfg, (1, 1), Global);
 
     // Homogeneous ideal: x^2, xy, xz
     let [p1, p2, p3] = poly_ring.with_wrapped_indeterminates(|[x, y, z]| {
