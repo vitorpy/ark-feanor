@@ -55,7 +55,12 @@
 //! 
 //! ## Gröbner Basis Computation
 //!
-//! ### Basic Usage
+//! ark-feanor provides two algorithms for computing Gröbner bases:
+//!
+//! ### Buchberger (F4-style)
+//!
+//! The default choice - reduces multiple S-polynomials in parallel before adding to basis.
+//! Good for sparse systems and lower memory usage.
 //!
 //! ```ignore
 //! use ark_feanor::*;
@@ -66,8 +71,26 @@
 //! // Define your polynomial system
 //! let system = vec![/* your polynomials */];
 //!
-//! // Compute Gröbner basis with degree reverse lexicographic ordering
+//! // Compute Gröbner basis with Buchberger
 //! let gb = buchberger_simple(&poly_ring, system, DegRevLex);
+//! ```
+//!
+//! ### True F4 Algorithm
+//!
+//! Processes S-polynomials in batches via matrix reduction. Best for dense systems
+//! over cryptographic fields where many S-polynomials are generated per degree.
+//!
+//! ```ignore
+//! use ark_feanor::*;
+//! use ark_feanor::f4::*;
+//!
+//! let field = &*BN254_FR;
+//! let poly_ring = MultivariatePolyRingImpl::new(field, 2);
+//!
+//! let system = vec![/* your polynomials */];
+//!
+//! // Compute Gröbner basis with F4
+//! let gb = f4_simple(&poly_ring, system, DegRevLex);
 //! ```
 //!
 //! ### With Degree Limiting (Recommended for Large Systems)
@@ -144,6 +167,9 @@ pub mod prime_field;
 pub mod homomorphisms;
 pub mod conversions;
 pub mod common_fields;
+
+// F4 algorithm for Gröbner bases
+pub mod f4;
 
 // Re-export main types
 pub use field_wrapper::ArkFieldWrapper;

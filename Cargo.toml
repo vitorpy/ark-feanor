@@ -25,7 +25,6 @@ ark-test-curves = "0.4"
 [features]
 default = ["std"]
 std = ["ark-ff/std", "ark-bn254/std", "ark-bls12-381/std"]
-parallel = ["ark-ff/parallel"]
 
 [[bench]]
 name = "comparison"
@@ -35,3 +34,6 @@ harness = false
 opt-level = 3
 lto = true
 codegen-units = 1
+
+[patch.crates-io]
+feanor-math = { path = "vendor/feanor-math" }
