@@ -1,5 +1,7 @@
 //! Tests for polynomial ring creation and operations
 
+#![feature(allocator_api)]
+
 use ark_feanor::*;
 use ark_bn254::Fr as BnFr;
 use ark_bls12_381::Fr as BlsFr;

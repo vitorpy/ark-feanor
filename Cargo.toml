@@ -2,6 +2,7 @@
 name = "ark-feanor"
 version = "0.4.0"
 edition = "2021"
+resolver = "2"
 authors = ["Vitor Py <vitor@vitorpy.com>"]
 license = "MIT OR Apache-2.0"
 description = "Bridge between arkworks finite fields and feanor-math ring system"
@@ -10,9 +11,15 @@ keywords = ["cryptography", "finite-fields", "polynomial", "groebner-basis", "ar
 categories = ["cryptography", "mathematics"]
 
 [dependencies]
-ark-ff = "0.4"
-ark-bn254 = "0.4"
-ark-bls12-381 = "0.4"
+# Forked ark-algebra with AVX512 IFMA support
+ark-ff = { path = "../ark-algebra/ff", default-features = false, features = ["std"] }
+ark-ec = { path = "../ark-algebra/ec", default-features = false, features = ["std"] }
+ark-serialize = { path = "../ark-algebra/serialize", default-features = false, features = ["std"] }
+ark-bn254 = { path = "../ark-algebra/curves/bn254", default-features = false, features = ["std", "curve", "scalar_field"] }
+ark-bls12-381 = { path = "../ark-algebra/curves/bls12_381", default-features = false, features = ["std", "curve", "scalar_field"] }
+ark-std = { version = "0.5.0", default-features = false, features = ["std"] }
+
+# Existing dependencies
 feanor-math = { path = "vendor/feanor-math", features = ["unstable-enable"] }
 num-bigint = "0.4"
 num-traits = "0.2"
@@ -20,14 +27,24 @@ lazy_static = "1.4"
 
 [dev-dependencies]
 criterion = "0.5"
-ark-test-curves = "0.4"
+ark-test-curves = { path = "../ark-algebra/test-curves", default-features = false }
 
 [features]
 default = ["std"]
-std = ["ark-ff/std", "ark-bn254/std", "ark-bls12-381/std"]
+std = ["ark-ff/std", "ark-ec/std", "ark-serialize/std", "ark-bn254/std", "ark-bls12-381/std", "ark-std/std"]
+avx512 = ["ark-ff/avx512"]
+avx512-ifma = ["ark-ff/avx512-ifma", "avx512"]
 
 [[bench]]
 name = "comparison"
+harness = false
+
+[[bench]]
+name = "buchberger_baseline"
+harness = false
+
+[[bench]]
+name = "f4_avx512"
 harness = false
 
 [profile.release]

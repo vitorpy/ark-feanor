@@ -1,4 +1,7 @@
 // Integration test for Phase 2 feanor-math features exposed through ark-feanor
+
+#![feature(allocator_api)]
+
 use ark_feanor::*;
 use feanor_math::rings::multivariate::multivariate_impl::{DegreeCfg, MultivariatePolyRingImpl};
 use std::alloc::Global;
