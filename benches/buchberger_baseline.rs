@@ -149,18 +149,18 @@ fn bench_buchberger_cyclic7(c: &mut Criterion) {
     group.finish();
 }
 
-/// Benchmark Buchberger on Katsura-9 system
-fn bench_buchberger_katsura9(c: &mut Criterion) {
-    let mut group = c.benchmark_group("buchberger_katsura9");
+/// Benchmark Buchberger on Katsura-7 system (reduced from 9 for practical runtime)
+fn bench_buchberger_katsura7(c: &mut Criterion) {
+    let mut group = c.benchmark_group("buchberger_katsura7");
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(120));
 
     let field = &*BN254_FR;
-    let n_vars = 9;
+    let n_vars = 7;
 
     let degree_cfg = DegreeCfg::new(15).with_precompute(15);
 
-    group.bench_function("katsura9_degrevlex", |b| {
+    group.bench_function("katsura7_degrevlex", |b| {
         let poly_ring = MultivariatePolyRingImpl::new_with_mult_table_ex(
             field, n_vars, degree_cfg, (0, 0), Global
         );
@@ -217,7 +217,7 @@ fn bench_buchberger_cyclic_scaling(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_buchberger_cyclic7,
-    bench_buchberger_katsura9,
+    bench_buchberger_katsura7,
     bench_buchberger_cyclic_scaling,
 );
 
