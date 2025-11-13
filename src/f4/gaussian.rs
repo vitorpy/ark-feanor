@@ -67,28 +67,25 @@ where
             _ => break, // No reducer available or we'd be reducing by ourselves
         };
 
-        // Clone the pivot row entries to avoid borrow checker issues
-        let pivot_row_entries: Vec<(usize, PolyCoeff<P>)> = matrix.rows[pivot_row_idx]
-            .entries
-            .iter()
-            .map(|(col, coeff)| (*col, base_ring.clone_el(coeff)))
-            .collect();
-        let pivot_row: SparseRow<PolyCoeff<P>> = SparseRow { entries: pivot_row_entries };
-
-        // Reduce: row -= (row[pivot_col] / pivot_row[pivot_col]) * pivot_row
+        // Compute multiplier before taking the row out
+        // This avoids cloning the pivot row entirely
         let row_leading_coeff = base_ring.clone_el(&matrix.rows[row_idx].entries[0].1);
-        let pivot_leading_coeff = base_ring.clone_el(&pivot_row.entries[0].1);
-
-        // Compute multiplier: row_leading_coeff / pivot_leading_coeff
+        let pivot_leading_coeff = base_ring.clone_el(&matrix.rows[pivot_row_idx].entries[0].1);
         let multiplier = base_ring.checked_div(&row_leading_coeff, &pivot_leading_coeff).unwrap();
 
-        // Perform: row -= multiplier * pivot_row
+        // Temporarily replace the target row with empty to allow immutable access to pivot row
+        let mut row = std::mem::replace(&mut matrix.rows[row_idx], SparseRow::new());
+
+        // Reduce: row -= multiplier * pivot_row
         subtract_scaled_row(
             &base_ring,
-            &mut matrix.rows[row_idx],
-            &pivot_row,
+            &mut row,
+            &matrix.rows[pivot_row_idx],
             &multiplier,
         );
+
+        // Put the row back
+        matrix.rows[row_idx] = row;
     }
 }
 
@@ -127,7 +124,8 @@ fn subtract_scaled_row<R>(
     R::Type: Field,
 {
     // Merge source into target
-    let mut result = Vec::new();
+    // Reserve capacity to avoid reallocations during merge
+    let mut result = Vec::with_capacity(target.entries.len() + source.entries.len());
     let mut target_iter = target.entries.iter();
     let mut source_iter = source.entries.iter();
 

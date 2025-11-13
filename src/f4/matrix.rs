@@ -186,6 +186,75 @@ where
     pub fn get_pivot_row(&self, col: usize) -> Option<usize> {
         self.pivot_rows.get(col).and_then(|&r| r)
     }
+
+    /// Reorder columns so pivot monomials come first
+    ///
+    /// This implements the A|B split from msolve: columns corresponding to S-poly LCMs
+    /// (intended pivot columns) are moved to the left, reducing reducer pressure and
+    /// improving elimination efficiency.
+    pub fn reorder_columns_pivot_first(&mut self, pivot_monomials: &[PolyMonomial<P>]) {
+        let num_cols = self.num_cols();
+        if num_cols == 0 {
+            return;
+        }
+
+        // Find column indices for pivot monomials
+        let mut pivot_cols = Vec::new();
+        for pivot_mono in pivot_monomials {
+            let expanded = self.ring.expand_monomial(pivot_mono);
+            if let Some(&col) = self.monomial_to_col.get(&expanded) {
+                pivot_cols.push(col);
+            }
+        }
+
+        // Remove duplicates and sort for stable ordering
+        pivot_cols.sort_unstable();
+        pivot_cols.dedup();
+
+        // Build new column order: pivot columns first, then non-pivot columns
+        let mut new_order = pivot_cols.clone();
+        for col in 0..num_cols {
+            if !pivot_cols.contains(&col) {
+                new_order.push(col);
+            }
+        }
+
+        // Build old_to_new mapping
+        let mut old_to_new = vec![0; num_cols];
+        for (new_col, &old_col) in new_order.iter().enumerate() {
+            old_to_new[old_col] = new_col;
+        }
+
+        // Remap all rows
+        for row in &mut self.rows {
+            for entry in &mut row.entries {
+                entry.0 = old_to_new[entry.0];
+            }
+            // Re-sort after remapping
+            row.sort();
+        }
+
+        // Reorder col_to_monomial
+        let old_col_to_monomial = std::mem::take(&mut self.col_to_monomial);
+        self.col_to_monomial = new_order
+            .iter()
+            .map(|&old_col| self.ring.clone_monomial(&old_col_to_monomial[old_col]))
+            .collect();
+
+        // Rebuild monomial_to_col
+        self.monomial_to_col.clear();
+        for (new_col, monomial) in self.col_to_monomial.iter().enumerate() {
+            let expanded = self.ring.expand_monomial(monomial);
+            self.monomial_to_col.insert(expanded, new_col);
+        }
+
+        // Reorder pivot_rows
+        let old_pivot_rows = std::mem::take(&mut self.pivot_rows);
+        self.pivot_rows = new_order
+            .iter()
+            .map(|&old_col| old_pivot_rows[old_col])
+            .collect();
+    }
 }
 
 #[cfg(test)]

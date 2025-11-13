@@ -160,6 +160,7 @@
 #![doc(html_root_url = "https://docs.rs/ark-feanor/0.1.0")]
 #![warn(missing_docs)]
 #![warn(rust_2018_idioms)]
+#![cfg_attr(test, feature(allocator_api))]
 
 // Core modules
 pub mod field_wrapper;

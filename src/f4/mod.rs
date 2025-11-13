@@ -43,6 +43,8 @@
 //! let gb = f4_simple(&ring, system, DegRevLex);
 //! ```
 
+#![cfg_attr(test, feature(allocator_api))]
+
 pub mod matrix;
 pub mod gaussian;
 
@@ -219,11 +221,18 @@ where
         ring.inclusion().mul_assign_map(f, lc_inv);
     }
 
-    // Generate initial S-polynomials
+    // Generate initial S-polynomials (with Buchberger product criterion)
     let mut spolys: Vec<SPoly> = Vec::new();
     for i in 0..basis.len() {
         for j in (i + 1)..basis.len() {
-            spolys.push(SPoly::new(i, j));
+            // Apply Buchberger product criterion: skip if leading terms are coprime
+            let (_, lm_i) = ring.LT(&basis[i], order).unwrap();
+            let (_, lm_j) = ring.LT(&basis[j], order).unwrap();
+
+            if !are_monomials_coprime(ring, lm_i, lm_j) {
+                spolys.push(SPoly::new(i, j));
+            }
+            // If coprime, S-poly will reduce to zero - skip it
         }
     }
 
@@ -285,8 +294,31 @@ where
             }
         }
 
-        // Add reducers (basis multiples) to matrix
-        add_reducers_to_matrix(&mut matrix, &basis, order);
+        // Compute LCM monomials for S-polys (intended pivot columns)
+        let pivot_monomials: Vec<_> = current_spolys
+            .iter()
+            .map(|sp| {
+                let (_, lm_i) = ring.LT(&basis[sp.i], order).unwrap();
+                let (_, lm_j) = ring.LT(&basis[sp.j], order).unwrap();
+                ring.monomial_lcm(ring.clone_monomial(lm_i), lm_j)
+            })
+            .collect();
+
+        // Reorder columns: put pivot columns (LCMs) first for A|B split
+        // This reduces reducer pressure and improves elimination efficiency
+        matrix.reorder_columns_pivot_first(&pivot_monomials);
+
+        // Identify pivot column indices (after reordering, these are now the leftmost columns)
+        let pivot_col_indices: std::collections::HashSet<usize> = pivot_monomials
+            .iter()
+            .filter_map(|m| {
+                let expanded = ring.expand_monomial(m);
+                matrix.monomial_to_col.get(&expanded).copied()
+            })
+            .collect();
+
+        // Add reducers (basis multiples) to matrix, skipping pivot columns
+        add_reducers_to_matrix_with_pivot_skip(&mut matrix, &basis, order, &pivot_col_indices);
 
         // Check matrix size limit
         if let Some(max_rows) = config.max_matrix_rows {
@@ -304,22 +336,53 @@ where
         let mut new_polys = Vec::new();
         for &row_idx in &new_pivot_rows {
             let poly = matrix.row_to_polynomial(&matrix.rows[row_idx]);
-            if !ring.is_zero(&poly) && !poly_in_basis(ring, &poly, &basis, order) {
-                new_polys.push(poly);
+            if ring.is_zero(&poly) {
+                continue;
             }
+            if poly_in_basis(ring, &poly, &basis, order) {
+                continue;
+            }
+            new_polys.push(poly);
         }
 
-        // Add new polynomials to basis and generate new S-polys
+        // Add new polynomials to basis and generate new S-polys with Gebauer-Möller filtering
         let old_basis_len = basis.len();
         for (idx, new_poly) in new_polys.into_iter().enumerate() {
             let new_idx = old_basis_len + idx;
+            let (_, new_lm) = ring.LT(&new_poly, order).unwrap();
 
-            // Generate S-polys with existing basis
-            for i in 0..basis.len() {
-                spolys.push(SPoly::new(i, new_idx));
+            // Collect new pairs (i, new_idx) with product criterion
+            let mut new_pairs = Vec::new();
+
+            // Generate S-polys with OLD basis elements (apply Buchberger criterion)
+            for i in 0..old_basis_len {
+                let (_, lm_i) = ring.LT(&basis[i], order).unwrap();
+                if !are_monomials_coprime(ring, lm_i, new_lm) {
+                    new_pairs.push(SPoly::new(i, new_idx));
+                }
             }
 
+            // Generate S-polys with PREVIOUSLY ADDED NEW elements in this iteration
+            for j in 0..idx {
+                let (_, lm_j) = ring.LT(&basis[old_basis_len + j], order).unwrap();
+                if !are_monomials_coprime(ring, lm_j, new_lm) {
+                    new_pairs.push(SPoly::new(old_basis_len + j, new_idx));
+                }
+            }
+
+            // Add the new element to the basis BEFORE applying GM criteria
             basis.push(new_poly);
+
+            // Apply Gebauer-Möller criterion to OLD pairs
+            // Remove old pairs (i,j) if LM(new) | LCM(i,j) and degrees of (i,new) and (j,new) ≤ deg(i,j)
+            gm_filter_old_pairs(ring, &mut spolys, &basis, new_idx, order);
+
+            // Apply Gebauer-Möller criterion to NEW pairs
+            // Remove dominated pairs (those whose LCM is divisible by an earlier pair's LCM)
+            gm_filter_new_pairs(ring, &mut new_pairs, &basis, order);
+
+            // Add filtered new pairs to the global list
+            spolys.extend(new_pairs);
         }
     }
 
@@ -329,7 +392,191 @@ where
     Ok(basis)
 }
 
+/// Check if two monomials are coprime (gcd = 1)
+///
+/// Two monomials are coprime if for every variable, at least one has exponent 0.
+/// This is used in the Buchberger product criterion.
+fn are_monomials_coprime<P>(ring: P, m1: &PolyMonomial<P>, m2: &PolyMonomial<P>) -> bool
+where
+    P: RingStore + Copy,
+    P::Type: MultivariatePolyRing,
+{
+    let deg1 = ring.monomial_deg(m1);
+    let deg2 = ring.monomial_deg(m2);
+
+    // Quick check: if either monomial is constant (degree 0), they're coprime
+    if deg1 == 0 || deg2 == 0 {
+        return true;
+    }
+
+    // Expand monomials to get exponents
+    let exp1 = ring.expand_monomial(m1);
+    let exp2 = ring.expand_monomial(m2);
+
+    // Check each variable: for coprimality, at least one monomial must have exponent 0 for each variable
+    for (e1, e2) in exp1.iter().zip(exp2.iter()) {
+        if *e1 > 0 && *e2 > 0 {
+            return false; // Both have this variable - not coprime
+        }
+    }
+
+    true
+}
+
+/// Gebauer-Möller criterion: filter old pairs when a new basis element is added
+///
+/// An old pair (i,j) is redundant if its LCM is divisible by the new leading term
+/// and both new pairs (i,new) and (j,new) have degrees ≤ the old pair's degree.
+fn gm_filter_old_pairs<P, O>(
+    ring: P,
+    spolys: &mut Vec<SPoly>,
+    basis: &[El<P>],
+    new_idx: usize,
+    order: O,
+) where
+    P: RingStore + Copy,
+    P::Type: MultivariatePolyRing,
+    <<P::Type as RingExtension>::BaseRing as RingStore>::Type: Field,
+    O: MonomialOrder + Copy,
+{
+    let (_, lm_new) = ring.LT(&basis[new_idx], order).unwrap();
+
+    spolys.retain(|sp| {
+        // Get LCM of the old pair
+        let (_, lm_i) = ring.LT(&basis[sp.i], order).unwrap();
+        let (_, lm_j) = ring.LT(&basis[sp.j], order).unwrap();
+        let lcm_old = ring.monomial_lcm(ring.clone_monomial(lm_i), lm_j);
+
+        // Check if new LT divides old LCM
+        if ring.monomial_div(ring.clone_monomial(&lcm_old), lm_new).is_err() {
+            return true; // Keep: new LT does not divide old LCM
+        }
+
+        // Compute LCMs of new pairs (i, new) and (j, new)
+        let lcm_i_new = ring.monomial_lcm(ring.clone_monomial(lm_i), lm_new);
+        let lcm_j_new = ring.monomial_lcm(ring.clone_monomial(lm_j), lm_new);
+
+        // Check that BOTH new LCMs are different from old LCM (msolve check)
+        // If either equals the old LCM, keep the old pair
+        if order.compare(ring, &lcm_i_new, &lcm_old) == std::cmp::Ordering::Equal ||
+           order.compare(ring, &lcm_j_new, &lcm_old) == std::cmp::Ordering::Equal {
+            return true; // Keep: one of the new pairs has the same LCM
+        }
+
+        // Check degrees: keep if either new pair has degree > old pair
+        let deg_i_new = ring.monomial_deg(&lcm_i_new);
+        let deg_j_new = ring.monomial_deg(&lcm_j_new);
+        let deg_old = ring.monomial_deg(&lcm_old);
+
+        // Keep if either new pair has degree > old pair
+        // Otherwise discard (the new pairs dominate)
+        deg_i_new > deg_old || deg_j_new > deg_old
+    });
+}
+
+/// Gebauer-Möller criterion: filter new pairs by LCM divisibility
+///
+/// Among new pairs, remove any whose LCM is divisible by an earlier pair's LCM
+/// with the earlier pair having ≤ degree.
+fn gm_filter_new_pairs<P, O>(
+    ring: P,
+    pairs: &mut Vec<SPoly>,
+    basis: &[El<P>],
+    order: O,
+) where
+    P: RingStore + Copy,
+    P::Type: MultivariatePolyRing,
+    <<P::Type as RingExtension>::BaseRing as RingStore>::Type: Field,
+    O: MonomialOrder + Copy,
+{
+    if pairs.is_empty() {
+        return;
+    }
+
+    // Sort pairs by degree (ascending), then by indices for stability
+    pairs.sort_by_key(|sp| (sp.lcm_degree(ring, basis, order), sp.i, sp.j));
+
+    let mut filtered: Vec<SPoly> = Vec::new();
+
+    for candidate in pairs.drain(..) {
+        let (_, lm_i) = ring.LT(&basis[candidate.i], order).unwrap();
+        let (_, lm_j) = ring.LT(&basis[candidate.j], order).unwrap();
+        let lcm_candidate = ring.monomial_lcm(ring.clone_monomial(lm_i), lm_j);
+        let deg_candidate = ring.monomial_deg(&lcm_candidate);
+
+        let mut dominated = false;
+        for kept in &filtered {
+            let (_, lm_ki) = ring.LT(&basis[kept.i], order).unwrap();
+            let (_, lm_kj) = ring.LT(&basis[kept.j], order).unwrap();
+            let lcm_kept = ring.monomial_lcm(ring.clone_monomial(lm_ki), lm_kj);
+            let deg_kept = ring.monomial_deg(&lcm_kept);
+
+            // Check if candidate LCM is divisible by kept LCM and degree is not better
+            if deg_candidate >= deg_kept {
+                if ring.monomial_div(ring.clone_monomial(&lcm_candidate), &lcm_kept).is_ok() {
+                    dominated = true;
+                    break;
+                }
+            }
+        }
+
+        if !dominated {
+            filtered.push(candidate);
+        }
+    }
+
+    *pairs = filtered;
+}
+
+/// Leading monomial index entry for fast reducer lookup
+struct LMIndexEntry<P>
+where
+    P: RingStore + Copy,
+    P::Type: MultivariatePolyRing,
+{
+    basis_idx: usize,
+    lm: PolyMonomial<P>,
+    degree: usize,
+    exponents: Vec<usize>,
+}
+
+/// Build an LM index for fast reducer search
+///
+/// Returns a vector sorted by degree, containing (index, LM, degree, exponents) for each basis element.
+fn build_lm_index<P, O>(ring: P, basis: &[El<P>], order: O) -> Vec<LMIndexEntry<P>>
+where
+    P: RingStore + Copy,
+    P::Type: MultivariatePolyRing,
+    <<P::Type as RingExtension>::BaseRing as RingStore>::Type: Field,
+    O: MonomialOrder + Copy,
+{
+    let mut index = Vec::new();
+
+    for (i, poly) in basis.iter().enumerate() {
+        if let Some((_, lm)) = ring.LT(poly, order) {
+            let degree = ring.monomial_deg(lm);
+            let exponents = ring.expand_monomial(lm);
+            index.push(LMIndexEntry {
+                basis_idx: i,
+                lm: ring.clone_monomial(lm),
+                degree,
+                exponents,
+            });
+        }
+    }
+
+    // Sort by degree (ascending) for faster lookup
+    index.sort_by_key(|e| e.degree);
+
+    index
+}
+
 /// Add necessary basis multiples to the matrix as reducers
+///
+/// Following msolve's approach: for each monomial M in the matrix, find the FIRST
+/// basis element whose leading term divides M, then add (M/LT(basis)) * basis as a reducer.
+///
+/// Uses an LM index for O(k) lookup per column where k = # basis elements with deg ≤ deg(M).
 fn add_reducers_to_matrix<P, O>(matrix: &mut MacaulayMatrix<P>, basis: &[El<P>], order: O)
 where
     P: RingStore + Copy,
@@ -337,15 +584,100 @@ where
     <<P::Type as RingExtension>::BaseRing as RingStore>::Type: Field,
     O: MonomialOrder + Copy,
 {
-    // For now, just add all basis elements directly
-    // A more sophisticated implementation would compute the necessary multiples
-    for poly in basis {
-        let row = matrix.polynomial_to_row(poly, order);
-        matrix.add_row(row);
+    use std::collections::HashSet;
+    add_reducers_to_matrix_with_pivot_skip(matrix, basis, order, &HashSet::new())
+}
+
+/// Add necessary basis multiples to the matrix as reducers, skipping pivot columns
+///
+/// Following msolve's approach: for each monomial M in the matrix (except pivot columns),
+/// find the FIRST basis element whose leading term divides M, then add (M/LT(basis)) * basis.
+///
+/// Pivot columns are S-poly LCMs that will become pivots; no reducers needed for them.
+fn add_reducers_to_matrix_with_pivot_skip<P, O>(
+    matrix: &mut MacaulayMatrix<P>,
+    basis: &[El<P>],
+    order: O,
+    pivot_cols: &std::collections::HashSet<usize>,
+)
+where
+    P: RingStore + Copy,
+    P::Type: MultivariatePolyRing,
+    <<P::Type as RingExtension>::BaseRing as RingStore>::Type: Field,
+    O: MonomialOrder + Copy,
+{
+    use std::collections::HashSet;
+
+    let ring = matrix.ring;
+
+    // Build LM index for fast degree-filtered lookup
+    let lm_index = build_lm_index(ring, basis, order);
+
+    // Collect all column indices (monomials) currently in the matrix
+    let mut monomial_cols: HashSet<usize> = HashSet::new();
+    for row in &matrix.rows {
+        for &(col, _) in &row.entries {
+            monomial_cols.insert(col);
+        }
+    }
+
+    // For each monomial in the matrix, try to find a reducer
+    for &col in &monomial_cols {
+        // Skip if this column already has a pivot (already has a reducer)
+        if matrix.has_pivot(col) {
+            continue;
+        }
+
+        // Skip pivot columns (S-poly LCMs) - they will become pivots
+        if pivot_cols.contains(&col) {
+            continue;
+        }
+
+        let monomial = &matrix.col_to_monomial[col];
+        let monomial_deg = ring.monomial_deg(monomial);
+        let monomial_exp = ring.expand_monomial(monomial);
+
+        // Find the first basis element whose LT divides this monomial
+        // Only scan basis elements with deg(LM) ≤ deg(monomial) using LM index
+        for entry in &lm_index {
+            // Degree prefilter: skip if basis LM has higher degree
+            if entry.degree > monomial_deg {
+                break; // Index is sorted, so we can stop here
+            }
+
+            // Variable-wise upper bound check: if any exponent in LM > monomial, skip
+            let mut can_divide = true;
+            for (lm_exp, mon_exp) in entry.exponents.iter().zip(monomial_exp.iter()) {
+                if lm_exp > mon_exp {
+                    can_divide = false;
+                    break;
+                }
+            }
+
+            if !can_divide {
+                continue;
+            }
+
+            // Full divisibility check
+            if let Ok(multiplier) = ring.monomial_div(ring.clone_monomial(monomial), &entry.lm) {
+                // Compute (monomial / LT(basis)) * basis
+                let mut reducer = ring.clone_el(&basis[entry.basis_idx]);
+                ring.mul_assign_monomial(&mut reducer, multiplier);
+
+                let row = matrix.polynomial_to_row(&reducer, order);
+                matrix.add_row(row);
+
+                // Only add ONE reducer per monomial
+                break;
+            }
+        }
     }
 }
 
-/// Check if a polynomial is already in the basis (up to scalar multiple)
+/// Check if a polynomial is redundant with respect to the basis
+///
+/// A polynomial is redundant if its leading monomial EXACTLY matches
+/// an existing basis element's leading monomial (not just divisible by).
 fn poly_in_basis<P, O>(ring: P, poly: &El<P>, basis: &[El<P>], order: O) -> bool
 where
     P: RingStore + Copy,
@@ -353,16 +685,17 @@ where
     <<P::Type as RingExtension>::BaseRing as RingStore>::Type: Field,
     O: MonomialOrder + Copy,
 {
-    let (_poly_lc, poly_lm) = match ring.LT(poly, order) {
+    let (_, poly_lm) = match ring.LT(poly, order) {
         Some(lt) => lt,
-        None => return false,
+        None => return true, // Zero polynomial is redundant
     };
 
+    // Check if ANY basis element has the SAME leading monomial
     for b in basis {
-        if let Some((_b_lc, b_lm)) = ring.LT(b, order) {
+        if let Some((_, b_lm)) = ring.LT(b, order) {
+            // Check for exact monomial equality
             if order.compare(ring, poly_lm, b_lm) == std::cmp::Ordering::Equal {
-                // Same leading monomial - check if they're scalar multiples
-                return true;
+                return true; // Same leading monomial - redundant
             }
         }
     }
@@ -455,13 +788,15 @@ where
 mod tests {
     use super::*;
     use feanor_math::homomorphism::Homomorphism;
-    use feanor_math::rings::multivariate::multivariate_impl::MultivariatePolyRingImpl;
+    use feanor_math::rings::multivariate::multivariate_impl::{MultivariatePolyRingImpl, DegreeCfg};
     use feanor_math::rings::multivariate::DegRevLex;
     use feanor_math::rings::zn::zn_static;
+    use std::alloc::Global;
 
     #[test]
     fn test_f4_simple() {
         let base = zn_static::F17;
+        // Use default ring (degree 64) but with lower max_degree config
         let ring = MultivariatePolyRingImpl::new(base, 2);
 
         // Simpler system to avoid degree overflow: x + y - 1, x*y - 2
@@ -476,7 +811,8 @@ mod tests {
             (base.int_hom().map(15), ring.create_monomial([0, 0])),
         ].into_iter());
 
-        let config = F4Config::new().with_max_degree(10);
+        // Add time budget to prevent infinite loops
+        let config = F4Config::new().with_max_degree(10).with_time_budget(std::time::Duration::from_secs(5));
         let gb = f4_configured(&ring, vec![f1, f2], DegRevLex, config).unwrap();
 
         // Should compute a Gröbner basis
@@ -509,5 +845,94 @@ mod tests {
             Err(GBAborted::DegreeExceeded { .. }) => {}, // Also acceptable
             Err(e) => panic!("Unexpected error: {:?}", e),
         }
+    }
+
+    #[test]
+    fn test_gebauer_moeller_product_criterion() {
+        let base = zn_static::F17;
+        let ring = MultivariatePolyRingImpl::new(base, 2);
+
+        // Test product criterion: x and y are coprime
+        let x_mono = ring.create_monomial([1, 0]);
+        let y_mono = ring.create_monomial([0, 1]);
+
+        assert!(are_monomials_coprime(&ring, &x_mono, &y_mono),
+                "x and y should be coprime");
+
+        // x^2 and y are coprime
+        let x2_mono = ring.create_monomial([2, 0]);
+        assert!(are_monomials_coprime(&ring, &x2_mono, &y_mono),
+                "x^2 and y should be coprime");
+
+        // xy and y are NOT coprime (share y)
+        let xy_mono = ring.create_monomial([1, 1]);
+        assert!(!are_monomials_coprime(&ring, &xy_mono, &y_mono),
+                "xy and y should not be coprime");
+
+        // xy and x^2 are NOT coprime (share x)
+        assert!(!are_monomials_coprime(&ring, &xy_mono, &x2_mono),
+                "xy and x^2 should not be coprime");
+    }
+
+    #[test]
+    fn test_f4_katsura_3() {
+        // Test Katsura-3 system for correctness with GM criteria
+        use crate::BN254_FR;
+
+        let field = &*BN254_FR;
+        let n = 3;
+        let degree_cfg = DegreeCfg::new(100).with_precompute(50);
+        let poly_ring = MultivariatePolyRingImpl::new_with_mult_table_ex(
+            field, n, degree_cfg, (0, 0), Global
+        );
+
+        // Create monomials for variables
+        let mut vars = Vec::new();
+        for i in 0..n {
+            let mut exponents = vec![0; n];
+            exponents[i] = 1;
+            vars.push(poly_ring.from_terms([(
+                poly_ring.base_ring().one(),
+                poly_ring.create_monomial(exponents.into_iter())
+            )].into_iter()));
+        }
+
+        // Build Katsura-3 system
+        let mut system = Vec::new();
+
+        // u_0 + 2*sum u_i = 1
+        let mut eq0 = poly_ring.clone_el(&vars[0]);
+        for i in 1..n {
+            let two = poly_ring.base_ring().int_hom().map(2);
+            let term = poly_ring.inclusion().map(two);
+            let scaled = poly_ring.mul_ref(&term, &vars[i]);
+            eq0 = poly_ring.add_ref(&eq0, &scaled);
+        }
+        let one = poly_ring.one();
+        system.push(poly_ring.add_ref(&eq0, &poly_ring.negate(one)));
+
+        // Katsura equations
+        for k in 0..(n-1) {
+            let mut poly = poly_ring.zero();
+            for i in 0..n {
+                for j in 0..n {
+                    let sum_abs = if i >= j { i - j } else { j - i };
+                    if sum_abs == k {
+                        let term = poly_ring.mul_ref(&vars[i], &vars[j]);
+                        poly = poly_ring.add_ref(&poly, &term);
+                    }
+                }
+            }
+            poly = poly_ring.sub_ref(&poly, &vars[k]);
+            system.push(poly);
+        }
+
+        // Run F4
+        let gb = f4_simple(&poly_ring, system, DegRevLex);
+
+        // Should produce a valid basis (Katsura-3 typically gives 4 elements)
+        assert!(!gb.is_empty());
+        assert!(gb.len() >= 3, "Katsura-3 should produce at least 3 basis elements");
+        assert!(gb.len() <= 5, "Katsura-3 should produce at most 5 basis elements");
     }
 }
