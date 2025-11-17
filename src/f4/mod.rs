@@ -47,9 +47,11 @@
 
 pub mod matrix;
 pub mod gaussian;
+pub mod monosig;
 
 use crate::f4::gaussian::{reduce_matrix, reduce_by_existing_pivots, reduce_tr_by_rr_on_A, reduce_matrix_tr};
 use crate::f4::matrix::{MacaulayMatrix, RowType, SparseRow};
+use crate::f4::monosig::MonSig;
 use feanor_math::algorithms::buchberger::GBAborted;
 use feanor_math::divisibility::DivisibilityRingStore;
 use feanor_math::field::Field;
@@ -438,33 +440,6 @@ where
 
         let t_rows = t_rows_0.elapsed();
 
-        // TEMPORARY: Disable column reindexing to verify it's the performance issue
-        // // Compute LCM monomials for S-polys (intended pivot columns)
-        // let pivot_monomials: Vec<_> = current_spolys
-        //     .iter()
-        //     .map(|sp| {
-        //         let (_, lm_i) = ring.LT(&basis[sp.i], order).unwrap();
-        //         let (_, lm_j) = ring.LT(&basis[sp.j], order).unwrap();
-        //         ring.monomial_lcm(ring.clone_monomial(lm_i), lm_j)
-        //     })
-        //     .collect();
-        //
-        // // Reorder columns: put pivot columns (LCMs) first for A|B split
-        // // This reduces reducer pressure and improves elimination efficiency
-        // matrix.reorder_columns_pivot_first(&pivot_monomials);
-        //
-        // // Identify pivot column indices (after reordering, these are now the leftmost columns)
-        // let pivot_col_indices: std::collections::HashSet<usize> = pivot_monomials
-        //     .iter()
-        //     .filter_map(|m| {
-        //         let expanded = ring.expand_monomial(m);
-        //         matrix.monomial_to_col.get(&expanded).copied()
-        //     })
-        //     .collect();
-        //
-        // // Add reducers (basis multiples) to matrix, skipping pivot columns
-        // add_reducers_to_matrix_with_pivot_skip(&mut matrix, &basis, order, &pivot_col_indices);
-
         // Build SHT idx: 2 = pivot LCM monomials, 1 = other monomials
         let mut sht_idx: HashMap<Vec<usize>, u8> = HashMap::new();
         for m in &pivot_monomials {
@@ -555,11 +530,16 @@ where
                 let pivot_mono = ring.clone_monomial(&matrix.col_to_monomial[pivot_col]);
                 let pivot_deg = ring.monomial_deg(&pivot_mono);
                 let pivot_exp = ring.expand_monomial(&pivot_mono);
+                let pivot_sig = MonSig::from_exponents(&pivot_exp);
 
                 // Find the FIRST basis LM dividing the pivot monomial using degree prefiltering
                 for entry in &lm_index {
                     // Degree prefilter: if basis LM degree > pivot degree, no division possible
                     if entry.degree > pivot_deg { break; }
+
+                    // Divmask prefilter: fast rejection based on presence mask and buckets
+                    if !entry.sig.presence_subset(&pivot_sig) { continue; }
+                    if !entry.sig.buckets_leq(&pivot_sig) { continue; }
 
                     // Quick per-variable bounds check before expensive monomial_div
                     let mut ok = true;
@@ -866,6 +846,13 @@ where
                 }
             }
 
+            // Sort rows by pivot column then density before AB reduction for better cache locality
+            matrix.sort_rows_by_pivot_and_density(rr_start_idx..rr_end_idx);
+            matrix.sort_rows_by_pivot_and_density(tr_start_idx..tr_end_idx);
+            if tr_end_idx < dedicated_end_idx {
+                matrix.sort_rows_by_pivot_and_density(tr_end_idx..dedicated_end_idx);
+            }
+
             // AB phase: reduce tr rows by rr rows (A-block only, columns < ncl)
             // CRITICAL: Must exclude tr rows from rr_range to prevent self-reduction infinite loop
             // Apply original rr rows first
@@ -929,6 +916,11 @@ where
                 }
             }
 
+            // Re-sort tr rows before CD reduction (pivots may have changed after AB phase)
+            if tr_start_idx < tr_end_idx {
+                matrix.sort_rows_by_pivot_and_density(tr_start_idx..tr_end_idx);
+            }
+
             // CD phase: reduce tr rows only, discover pivots in B/D blocks (columns >= ncl)
             let (new_pivot_rows, tr_new_pivots, anomaly_a_pivots) = if tr_start_idx < tr_end_idx {
                 reduce_matrix_tr(&mut matrix, tr_start_idx..tr_end_idx, ncl_val)
@@ -949,6 +941,8 @@ where
             new_pivot_rows
         } else {
             // Fallback: use original reduce_matrix if ncl is not set
+            // Sort all rows by pivot then density for better elimination performance
+            matrix.sort_rows_by_pivot_and_density(0..matrix.num_rows());
             reduce_matrix(&mut matrix)
         };
 
@@ -1060,10 +1054,20 @@ where
             // This means the new element can reduce i, making i redundant
             // NOTE: We do NOT mark i redundant if LM(i) divides LM(new) - that would be wrong!
             let (_, lm_new2) = ring.LT(&basis[new_idx], order).unwrap();
+            let lm_new2_exp = ring.expand_monomial(lm_new2);
+            let lm_new2_sig = MonSig::from_exponents(&lm_new2_exp);
             let mut newly_marked = 0;
             for i in 0..new_idx {
                 if red_flags[i] { continue; }
                 let (_, lm_i2) = ring.LT(&basis[i], order).unwrap();
+                let lm_i2_exp = ring.expand_monomial(lm_i2);
+                let lm_i2_sig = MonSig::from_exponents(&lm_i2_exp);
+
+                // Divmask prefilter: check if lm_new2 can divide lm_i2
+                if lm_new2_sig.deg as usize > lm_i2_sig.deg as usize { continue; }
+                if !lm_new2_sig.presence_subset(&lm_i2_sig) { continue; }
+                if !lm_new2_sig.buckets_leq(&lm_i2_sig) { continue; }
+
                 // Only mark i redundant if the NEW element can reduce it
                 if ring.monomial_div(ring.clone_monomial(lm_i2), lm_new2).is_ok() {
                     red_flags[i] = true;
@@ -1148,12 +1152,27 @@ fn gm_filter_old_pairs<P, O>(
     O: MonomialOrder + Copy,
 {
     let (_, lm_new) = ring.LT(&basis[new_idx], order).unwrap();
+    let lm_new_exp = ring.expand_monomial(lm_new);
+    let lm_new_sig = MonSig::from_exponents(&lm_new_exp);
 
     spolys.retain(|sp| {
         // Get LCM of the old pair
         let (_, lm_i) = ring.LT(&basis[sp.i], order).unwrap();
         let (_, lm_j) = ring.LT(&basis[sp.j], order).unwrap();
         let lcm_old = ring.monomial_lcm(ring.clone_monomial(lm_i), lm_j);
+        let lcm_old_exp = ring.expand_monomial(&lcm_old);
+        let lcm_old_sig = MonSig::from_exponents(&lcm_old_exp);
+
+        // Divmask prefilter: check if new LT can divide old LCM
+        if lm_new_sig.deg as usize > lcm_old_sig.deg as usize {
+            return true; // Keep: degree too high, cannot divide
+        }
+        if !lm_new_sig.presence_subset(&lcm_old_sig) {
+            return true; // Keep: presence not subset, cannot divide
+        }
+        if !lm_new_sig.buckets_leq(&lcm_old_sig) {
+            return true; // Keep: bucket check fails, cannot divide
+        }
 
         // Check if new LT divides old LCM
         if ring.monomial_div(ring.clone_monomial(&lcm_old), lm_new).is_err() {
@@ -1211,6 +1230,8 @@ fn gm_filter_new_pairs<P, O>(
         let (_, lm_j) = ring.LT(&basis[candidate.j], order).unwrap();
         let lcm_candidate = ring.monomial_lcm(ring.clone_monomial(lm_i), lm_j);
         let deg_candidate = ring.monomial_deg(&lcm_candidate);
+        let lcm_candidate_exp = ring.expand_monomial(&lcm_candidate);
+        let lcm_candidate_sig = MonSig::from_exponents(&lcm_candidate_exp);
 
         let mut dominated = false;
         for kept in &filtered {
@@ -1221,6 +1242,13 @@ fn gm_filter_new_pairs<P, O>(
 
             // Check if candidate LCM is divisible by kept LCM and degree is not better
             if deg_candidate >= deg_kept {
+                // Divmask prefilter: check if kept LCM can divide candidate LCM
+                let lcm_kept_exp = ring.expand_monomial(&lcm_kept);
+                let lcm_kept_sig = MonSig::from_exponents(&lcm_kept_exp);
+
+                if !lcm_kept_sig.presence_subset(&lcm_candidate_sig) { continue; }
+                if !lcm_kept_sig.buckets_leq(&lcm_candidate_sig) { continue; }
+
                 if ring.monomial_div(ring.clone_monomial(&lcm_candidate), &lcm_kept).is_ok() {
                     dominated = true;
                     break;
@@ -1246,6 +1274,7 @@ where
     lm: PolyMonomial<P>,
     degree: usize,
     exponents: Vec<usize>,
+    sig: MonSig,
 }
 
 /// Build an LM index for fast reducer search
@@ -1264,11 +1293,13 @@ where
         if let Some((_, lm)) = ring.LT(poly, order) {
             let degree = ring.monomial_deg(lm);
             let exponents = ring.expand_monomial(lm);
+            let sig = MonSig::from_exponents(&exponents);
             index.push(LMIndexEntry {
                 basis_idx: i,
                 lm: ring.clone_monomial(lm),
                 degree,
                 exponents,
+                sig,
             });
         }
     }
@@ -1277,151 +1308,6 @@ where
     index.sort_by_key(|e| e.degree);
 
     index
-}
-
-/// Add necessary basis multiples to the matrix as reducers
-///
-/// Following msolve's approach: for each monomial M in the matrix, find the FIRST
-/// basis element whose leading term divides M, then add (M/LT(basis)) * basis as a reducer.
-fn add_reducers_to_matrix<P, O>(matrix: &mut MacaulayMatrix<P>, basis: &[El<P>], order: O)
-where
-    P: RingStore + Copy,
-    P::Type: MultivariatePolyRing,
-    <<P::Type as RingExtension>::BaseRing as RingStore>::Type: Field,
-    O: MonomialOrder + Copy,
-{
-    use std::collections::HashSet;
-
-    let ring = matrix.ring;
-
-    // Collect all column indices (monomials) currently in the matrix
-    let mut monomial_cols: HashSet<usize> = HashSet::new();
-    for row in &matrix.rows {
-        for &(col, _) in &row.entries {
-            monomial_cols.insert(col);
-        }
-    }
-
-    // For each monomial in the matrix, try to find a reducer
-    for &col in &monomial_cols {
-        // Skip if this column already has a pivot (already has a reducer)
-        if matrix.has_pivot(col) {
-            continue;
-        }
-
-        let monomial = &matrix.col_to_monomial[col];
-
-        // Find the FIRST (in basis order) basis element whose LT divides this monomial
-        // This order is important for correctness
-        for basis_poly in basis {
-            if let Some((_, basis_lt)) = ring.LT(basis_poly, order) {
-                // Check if basis_lt divides monomial
-                if let Ok(multiplier) = ring.monomial_div(ring.clone_monomial(monomial), basis_lt) {
-                    // Compute (monomial / LT(basis)) * basis
-                    let mut reducer = ring.clone_el(basis_poly);
-                    ring.mul_assign_monomial(&mut reducer, multiplier);
-
-                    let row = matrix.polynomial_to_row(&reducer, order);
-                    matrix.add_row(row, RowType::Closure);
-
-                    // Only add ONE reducer per monomial
-                    break;
-                }
-            }
-        }
-    }
-}
-
-/// Add necessary basis multiples to the matrix as reducers, skipping pivot columns
-///
-/// Following msolve's approach: for each monomial M in the matrix (except pivot columns),
-/// find the FIRST basis element whose leading term divides M, then add (M/LT(basis)) * basis.
-///
-/// Pivot columns are S-poly LCMs that will become pivots; no reducers needed for them.
-fn add_reducers_to_matrix_with_pivot_skip<P, O>(
-    matrix: &mut MacaulayMatrix<P>,
-    basis: &[El<P>],
-    order: O,
-    pivot_cols: &std::collections::HashSet<usize>,
-)
-where
-    P: RingStore + Copy,
-    P::Type: MultivariatePolyRing,
-    <<P::Type as RingExtension>::BaseRing as RingStore>::Type: Field,
-    O: MonomialOrder + Copy,
-{
-    use std::collections::HashSet;
-
-    let ring = matrix.ring;
-
-    // Build LM index for fast degree-filtered lookup
-    let lm_index = build_lm_index(ring, basis, order);
-
-    // Collect all column indices (monomials) currently in the matrix
-    let mut monomial_cols: HashSet<usize> = HashSet::new();
-    for row in &matrix.rows {
-        for &(col, _) in &row.entries {
-            monomial_cols.insert(col);
-        }
-    }
-
-    // For each monomial in the matrix, try to find a reducer
-    for &col in &monomial_cols {
-        // Skip if this column already has a pivot (already has a reducer)
-        if matrix.has_pivot(col) {
-            continue;
-        }
-
-        // Skip pivot columns (S-poly LCMs) - they will become pivots
-        if pivot_cols.contains(&col) {
-            continue;
-        }
-
-        // Clone monomial to avoid borrowing matrix immutably across mutable use
-        let monomial = ring.clone_monomial(&matrix.col_to_monomial[col]);
-        let monomial_deg = ring.monomial_deg(&monomial);
-        let monomial_exp = ring.expand_monomial(&monomial);
-        let pivot_count = pivot_cols.len();
-
-        // Find the first basis element whose LT divides this monomial
-        // Only scan basis elements with deg(LM) ≤ deg(monomial) using LM index
-        for entry in &lm_index {
-            // Degree prefilter: skip if basis LM has higher degree
-            if entry.degree > monomial_deg {
-                break; // Index is sorted, so we can stop here
-            }
-
-            // Variable-wise upper bound check: if any exponent in LM > monomial, skip
-            let mut can_divide = true;
-            for (lm_exp, mon_exp) in entry.exponents.iter().zip(monomial_exp.iter()) {
-                if lm_exp > mon_exp {
-                    can_divide = false;
-                    break;
-                }
-            }
-
-            if !can_divide {
-                continue;
-            }
-
-            // Full divisibility check
-            if let Ok(multiplier) = ring.monomial_div(ring.clone_monomial(&monomial), &entry.lm) {
-                // Compute (monomial / LT(basis)) * basis
-                let mut reducer = ring.clone_el(&basis[entry.basis_idx]);
-                ring.mul_assign_monomial(&mut reducer, multiplier);
-
-                let row = matrix.polynomial_to_row(&reducer, order);
-                // Keep full row support (no pruning)
-                if row.entries.is_empty() {
-                    continue;
-                }
-                matrix.add_row(row, RowType::Closure);
-
-                // Only add ONE reducer per monomial
-                break;
-            }
-        }
-    }
 }
 
 /// Add reducers only for a provided set of target columns (typically from S-poly rows),
@@ -1451,9 +1337,15 @@ where
         let monomial = ring.clone_monomial(&matrix.col_to_monomial[col]);
         let monomial_deg = ring.monomial_deg(&monomial);
         let monomial_exp = ring.expand_monomial(&monomial);
+        let monomial_sig = MonSig::from_exponents(&monomial_exp);
 
         for entry in lm_index {
             if entry.degree > monomial_deg { break; }
+
+            // Divmask prefilter: fast rejection based on presence mask and buckets
+            if !entry.sig.presence_subset(&monomial_sig) { continue; }
+            if !entry.sig.buckets_leq(&monomial_sig) { continue; }
+
             let mut can_divide = true;
             for (lm_exp, mon_exp) in entry.exponents.iter().zip(monomial_exp.iter()) {
                 if lm_exp > mon_exp { can_divide = false; break; }

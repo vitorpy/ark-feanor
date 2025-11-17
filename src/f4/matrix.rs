@@ -528,6 +528,68 @@ where
         }
         self.pivot_rows = new_pivot_rows;
     }
+
+    /// Sort rows in the given range by pivot column (ascending) then density (ascending).
+    ///
+    /// This improves cache locality and reduction efficiency during Gaussian elimination.
+    /// Rows are sorted by:
+    /// 1. Pivot column (leftmost non-zero column) - ascending
+    /// 2. Density (number of entries) - ascending
+    ///
+    /// Zero rows (empty rows) are placed at the end of the range.
+    /// The corresponding row_types are permuted along with the rows.
+    pub fn sort_rows_by_pivot_and_density(&mut self, range: std::ops::Range<usize>) {
+        if range.start >= range.end || range.end > self.rows.len() {
+            return; // Empty or invalid range
+        }
+
+        // Build index array for stable sorting
+        let len = range.end - range.start;
+        let mut indices: Vec<usize> = (0..len).collect();
+
+        // Compute sorting keys once: (pivot_col, density) for each row
+        let keys: Vec<(Option<usize>, usize)> = (range.start..range.end)
+            .map(|i| {
+                let pivot = self.rows[i].pivot();
+                let density = self.rows[i].entries.len();
+                (pivot, density)
+            })
+            .collect();
+
+        // Sort indices by keys: None pivots (zero rows) last, then by (pivot, density)
+        indices.sort_by_key(|&idx| {
+            let (pivot, density) = keys[idx];
+            match pivot {
+                Some(p) => (0, p, density), // Non-zero rows: sort by pivot then density
+                None => (1, usize::MAX, density), // Zero rows: place at end
+            }
+        });
+
+        // Check if already sorted (optimization to avoid unnecessary work)
+        if indices.iter().enumerate().all(|(i, &idx)| i == idx) {
+            return;
+        }
+
+        // Apply permutation in-place using cycle decomposition
+        let mut done = vec![false; len];
+        for start in 0..len {
+            if done[start] {
+                continue;
+            }
+
+            let mut current = start;
+            while !done[current] {
+                done[current] = true;
+                let next = indices[current];
+                if next != start && !done[next] {
+                    // Swap rows and row_types
+                    self.rows.swap(range.start + current, range.start + next);
+                    self.row_types.swap(range.start + current, range.start + next);
+                }
+                current = next;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
