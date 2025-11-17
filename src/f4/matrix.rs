@@ -212,9 +212,11 @@ where
         pivot_cols.dedup();
 
         // Build new column order: pivot columns first, then non-pivot columns
+        // Use HashSet for O(1) lookup instead of Vec::contains which is O(n)
+        let pivot_set: std::collections::HashSet<usize> = pivot_cols.iter().copied().collect();
         let mut new_order = pivot_cols.clone();
         for col in 0..num_cols {
-            if !pivot_cols.contains(&col) {
+            if !pivot_set.contains(&col) {
                 new_order.push(col);
             }
         }

@@ -294,31 +294,35 @@ where
             }
         }
 
-        // Compute LCM monomials for S-polys (intended pivot columns)
-        let pivot_monomials: Vec<_> = current_spolys
-            .iter()
-            .map(|sp| {
-                let (_, lm_i) = ring.LT(&basis[sp.i], order).unwrap();
-                let (_, lm_j) = ring.LT(&basis[sp.j], order).unwrap();
-                ring.monomial_lcm(ring.clone_monomial(lm_i), lm_j)
-            })
-            .collect();
+        // TEMPORARY: Disable column reindexing to verify it's the performance issue
+        // // Compute LCM monomials for S-polys (intended pivot columns)
+        // let pivot_monomials: Vec<_> = current_spolys
+        //     .iter()
+        //     .map(|sp| {
+        //         let (_, lm_i) = ring.LT(&basis[sp.i], order).unwrap();
+        //         let (_, lm_j) = ring.LT(&basis[sp.j], order).unwrap();
+        //         ring.monomial_lcm(ring.clone_monomial(lm_i), lm_j)
+        //     })
+        //     .collect();
+        //
+        // // Reorder columns: put pivot columns (LCMs) first for A|B split
+        // // This reduces reducer pressure and improves elimination efficiency
+        // matrix.reorder_columns_pivot_first(&pivot_monomials);
+        //
+        // // Identify pivot column indices (after reordering, these are now the leftmost columns)
+        // let pivot_col_indices: std::collections::HashSet<usize> = pivot_monomials
+        //     .iter()
+        //     .filter_map(|m| {
+        //         let expanded = ring.expand_monomial(m);
+        //         matrix.monomial_to_col.get(&expanded).copied()
+        //     })
+        //     .collect();
+        //
+        // // Add reducers (basis multiples) to matrix, skipping pivot columns
+        // add_reducers_to_matrix_with_pivot_skip(&mut matrix, &basis, order, &pivot_col_indices);
 
-        // Reorder columns: put pivot columns (LCMs) first for A|B split
-        // This reduces reducer pressure and improves elimination efficiency
-        matrix.reorder_columns_pivot_first(&pivot_monomials);
-
-        // Identify pivot column indices (after reordering, these are now the leftmost columns)
-        let pivot_col_indices: std::collections::HashSet<usize> = pivot_monomials
-            .iter()
-            .filter_map(|m| {
-                let expanded = ring.expand_monomial(m);
-                matrix.monomial_to_col.get(&expanded).copied()
-            })
-            .collect();
-
-        // Add reducers (basis multiples) to matrix, skipping pivot columns
-        add_reducers_to_matrix_with_pivot_skip(&mut matrix, &basis, order, &pivot_col_indices);
+        // Use original reducer addition without pivot skipping
+        add_reducers_to_matrix(&mut matrix, &basis, order);
 
         // Check matrix size limit
         if let Some(max_rows) = config.max_matrix_rows {
@@ -575,8 +579,6 @@ where
 ///
 /// Following msolve's approach: for each monomial M in the matrix, find the FIRST
 /// basis element whose leading term divides M, then add (M/LT(basis)) * basis as a reducer.
-///
-/// Uses an LM index for O(k) lookup per column where k = # basis elements with deg ≤ deg(M).
 fn add_reducers_to_matrix<P, O>(matrix: &mut MacaulayMatrix<P>, basis: &[El<P>], order: O)
 where
     P: RingStore + Copy,
@@ -585,7 +587,45 @@ where
     O: MonomialOrder + Copy,
 {
     use std::collections::HashSet;
-    add_reducers_to_matrix_with_pivot_skip(matrix, basis, order, &HashSet::new())
+
+    let ring = matrix.ring;
+
+    // Collect all column indices (monomials) currently in the matrix
+    let mut monomial_cols: HashSet<usize> = HashSet::new();
+    for row in &matrix.rows {
+        for &(col, _) in &row.entries {
+            monomial_cols.insert(col);
+        }
+    }
+
+    // For each monomial in the matrix, try to find a reducer
+    for &col in &monomial_cols {
+        // Skip if this column already has a pivot (already has a reducer)
+        if matrix.has_pivot(col) {
+            continue;
+        }
+
+        let monomial = &matrix.col_to_monomial[col];
+
+        // Find the FIRST (in basis order) basis element whose LT divides this monomial
+        // This order is important for correctness
+        for basis_poly in basis {
+            if let Some((_, basis_lt)) = ring.LT(basis_poly, order) {
+                // Check if basis_lt divides monomial
+                if let Ok(multiplier) = ring.monomial_div(ring.clone_monomial(monomial), basis_lt) {
+                    // Compute (monomial / LT(basis)) * basis
+                    let mut reducer = ring.clone_el(basis_poly);
+                    ring.mul_assign_monomial(&mut reducer, multiplier);
+
+                    let row = matrix.polynomial_to_row(&reducer, order);
+                    matrix.add_row(row);
+
+                    // Only add ONE reducer per monomial
+                    break;
+                }
+            }
+        }
+    }
 }
 
 /// Add necessary basis multiples to the matrix as reducers, skipping pivot columns
