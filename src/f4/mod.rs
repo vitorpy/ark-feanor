@@ -674,16 +674,26 @@ where
 
         // Add new polynomials to basis and generate new S-polys with Gebauer-Möller filtering
         let old_basis_len = basis.len();
+        let mut total_red_skipped = 0;
+        let mut total_gm_old_removed = 0;
+        let mut total_gm_new_removed = 0;
+        let mut total_red_marked = 0;
+
         for (idx, new_poly) in new_polys.into_iter().enumerate() {
             let new_idx = old_basis_len + idx;
             let (_, new_lm) = ring.LT(&new_poly, order).unwrap();
 
             // Collect new pairs (i, new_idx) with product criterion
             let mut new_pairs = Vec::new();
+            let mut red_skipped_old = 0;
+            let mut red_skipped_new = 0;
 
             // Generate S-polys with OLD basis elements (apply Buchberger criterion)
             for i in 0..old_basis_len {
-                if red_flags.get(i).copied().unwrap_or(false) { continue; }
+                if red_flags.get(i).copied().unwrap_or(false) {
+                    red_skipped_old += 1;
+                    continue;
+                }
                 let (_, lm_i) = ring.LT(&basis[i], order).unwrap();
                 if !are_monomials_coprime(ring, lm_i, new_lm) {
                     new_pairs.push(SPoly::new(i, new_idx));
@@ -692,39 +702,57 @@ where
 
             // Generate S-polys with PREVIOUSLY ADDED NEW elements in this iteration
             for j in 0..idx {
-                if red_flags.get(old_basis_len + j).copied().unwrap_or(false) { continue; }
+                if red_flags.get(old_basis_len + j).copied().unwrap_or(false) {
+                    red_skipped_new += 1;
+                    continue;
+                }
                 let (_, lm_j) = ring.LT(&basis[old_basis_len + j], order).unwrap();
                 if !are_monomials_coprime(ring, lm_j, new_lm) {
                     new_pairs.push(SPoly::new(old_basis_len + j, new_idx));
                 }
             }
 
+            total_red_skipped += red_skipped_old + red_skipped_new;
+
             // Add the new element to the basis BEFORE applying GM criteria
             basis.push(new_poly);
             red_flags.push(false);
+
             // Mark redundancies (bs->red): mark i as redundant if LM(new) divides LM(i)
             // This means the new element can reduce i, making i redundant
             // NOTE: We do NOT mark i redundant if LM(i) divides LM(new) - that would be wrong!
             let (_, lm_new2) = ring.LT(&basis[new_idx], order).unwrap();
+            let mut newly_marked = 0;
             for i in 0..new_idx {
                 if red_flags[i] { continue; }
                 let (_, lm_i2) = ring.LT(&basis[i], order).unwrap();
                 // Only mark i redundant if the NEW element can reduce it
                 if ring.monomial_div(ring.clone_monomial(lm_i2), lm_new2).is_ok() {
                     red_flags[i] = true;
+                    newly_marked += 1;
                 }
             }
+            total_red_marked += newly_marked;
 
             // Apply Gebauer-Möller criterion to OLD pairs
             // Remove old pairs (i,j) if LM(new) | LCM(i,j) and degrees of (i,new) and (j,new) ≤ deg(i,j)
+            let old_spolys_len = spolys.len();
             gm_filter_old_pairs(ring, &mut spolys, &basis, new_idx, order);
+            total_gm_old_removed += old_spolys_len - spolys.len();
 
             // Apply Gebauer-Möller criterion to NEW pairs
             // Remove dominated pairs (those whose LCM is divisible by an earlier pair's LCM)
+            let before_gm_new = new_pairs.len();
             gm_filter_new_pairs(ring, &mut new_pairs, &basis, order);
+            total_gm_new_removed += before_gm_new - new_pairs.len();
 
             // Add filtered new pairs to the global list
             spolys.extend(new_pairs);
+        }
+
+        if profile && (total_red_skipped > 0 || total_gm_old_removed > 0 || total_gm_new_removed > 0 || total_red_marked > 0) {
+            println!("[F4]   Pair filtering: red_skipped={} gm_old_removed={} gm_new_removed={} red_marked={}",
+                total_red_skipped, total_gm_old_removed, total_gm_new_removed, total_red_marked);
         }
     }
 
