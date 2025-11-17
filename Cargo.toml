@@ -47,6 +47,33 @@ harness = false
 name = "f4_avx512"
 harness = false
 
+# Microbenchmarks: Field operations
+[[bench]]
+name = "field_ops"
+harness = false
+
+[[bench]]
+name = "field_ops_avx512"
+harness = false
+
+# Tiny problem benchmarks: Buchberger
+[[bench]]
+name = "buchberger_tiny"
+harness = false
+
+[[bench]]
+name = "buchberger_tiny_avx512"
+harness = false
+
+# Tiny problem benchmarks: F4
+[[bench]]
+name = "f4_tiny"
+harness = false
+
+[[bench]]
+name = "f4_tiny_avx512"
+harness = false
+
 [profile.release]
 opt-level = 3
 lto = true
