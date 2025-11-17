@@ -476,8 +476,7 @@ where
         // to ensure the SHT reflects all monomials that will be present in the matrix.
 
         let t_reorder_0 = Instant::now();
-        // TEMPORARILY DISABLED FOR DEBUGGING
-        if false && !pivot_indices.is_empty() {
+        if !pivot_indices.is_empty() {
             // Fill SHT with current rr/tr monomials as idx=1 before mapping
             // This ensures all monomials from rr/tr rows are tracked before column reordering
             for r in 0..matrix.num_rows() {
@@ -540,12 +539,10 @@ where
                         // Add reducer: (pivot / LM(b)) * b as a new row
                         let mut reducer = ring.clone_el(&basis[entry.basis_idx]);
                         ring.mul_assign_monomial(&mut reducer, mult);
-                        let mut row = matrix.polynomial_to_row(&reducer, order);
+                        let row = matrix.polynomial_to_row(&reducer, order);
 
-                        // CRITICAL: Keep only A-block entries to avoid tail growth
-                        // This is essential for msolve alignment - reducer rows should not
-                        // introduce new tail columns during symbolic preprocessing
-                        row.entries.retain(|(c, _)| *c < pivot_count);
+                        // Keep full row support for dedicated pivot reducers
+                        // These are specifically for pivot columns and need full support
                         if row.entries.is_empty() { continue; }
                         matrix.add_row(row);
                         break; // One reducer per pivot column
@@ -1047,11 +1044,9 @@ where
                 let mut reducer = ring.clone_el(&basis[entry.basis_idx]);
                 ring.mul_assign_monomial(&mut reducer, multiplier);
 
-                let mut row = matrix.polynomial_to_row(&reducer, order);
-                // Restrict reducer rows to A-block (pivot) columns only
-                row.entries.retain(|(c, _)| *c < pivot_count);
+                let row = matrix.polynomial_to_row(&reducer, order);
+                // Keep full row support (no pruning)
                 if row.entries.is_empty() {
-                    // Try next candidate; this reducer contributes nothing to A-block
                     continue;
                 }
                 matrix.add_row(row);
@@ -1101,8 +1096,8 @@ where
             if let Ok(multiplier) = ring.monomial_div(ring.clone_monomial(&monomial), &entry.lm) {
                 let mut reducer = ring.clone_el(&basis[entry.basis_idx]);
                 ring.mul_assign_monomial(&mut reducer, multiplier);
-                let mut row = matrix.polynomial_to_row(&reducer, order);
-                row.entries.retain(|(c, _)| *c < pivot_count);
+                let row = matrix.polynomial_to_row(&reducer, order);
+                // Keep full row support (no A-block pruning) per user's analysis
                 if row.entries.is_empty() { continue; }
                 matrix.add_row(row);
                 break;
