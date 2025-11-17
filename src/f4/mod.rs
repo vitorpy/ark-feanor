@@ -642,13 +642,15 @@ where
             // Add the new element to the basis BEFORE applying GM criteria
             basis.push(new_poly);
             red_flags.push(false);
-            // Mark redundancies (bs->red): if LM(existing) divides LM(new) or vice versa
+            // Mark redundancies (bs->red): mark i as redundant if LM(new) divides LM(i)
+            // This means the new element can reduce i, making i redundant
+            // NOTE: We do NOT mark i redundant if LM(i) divides LM(new) - that would be wrong!
             let (_, lm_new2) = ring.LT(&basis[new_idx], order).unwrap();
             for i in 0..new_idx {
                 if red_flags[i] { continue; }
                 let (_, lm_i2) = ring.LT(&basis[i], order).unwrap();
-                if ring.monomial_div(ring.clone_monomial(lm_new2), lm_i2).is_ok() ||
-                   ring.monomial_div(ring.clone_monomial(lm_i2), lm_new2).is_ok() {
+                // Only mark i redundant if the NEW element can reduce it
+                if ring.monomial_div(ring.clone_monomial(lm_i2), lm_new2).is_ok() {
                     red_flags[i] = true;
                 }
             }
