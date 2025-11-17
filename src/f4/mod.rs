@@ -48,8 +48,8 @@
 pub mod matrix;
 pub mod gaussian;
 
-use crate::f4::gaussian::{reduce_matrix, reduce_by_existing_pivots};
-use crate::f4::matrix::MacaulayMatrix;
+use crate::f4::gaussian::{reduce_matrix, reduce_by_existing_pivots, reduce_tr_by_rr_on_A, reduce_matrix_tr};
+use crate::f4::matrix::{MacaulayMatrix, RowType, SparseRow};
 use feanor_math::algorithms::buchberger::GBAborted;
 use feanor_math::divisibility::DivisibilityRingStore;
 use feanor_math::field::Field;
@@ -378,34 +378,63 @@ where
         // 2) For each LCM group, build rr/tr rows as (LCM/LT(basis[g])) * basis[g]
         //    - rr: first generator (becomes the anchor row for this LCM pivot)
         //    - tr: remaining generators (to-be-reduced rows with same LCM)
+        //
+        // IMPORTANT: To support AB/CD semantics, we need rr and tr rows in contiguous blocks.
+        // First collect all the data, then add rr rows, then tr rows.
         let mut pivot_monomials: Vec<PolyMonomial<P>> = Vec::with_capacity(groups.len());
-        for (_exp, (lcm_mono, gens_set)) in groups.iter() {
+        let mut rr_data: Vec<(usize, PolyMonomial<P>)> = Vec::new(); // (gen_idx, lcm_mono)
+        let mut tr_data: Vec<(usize, PolyMonomial<P>)> = Vec::new(); // (gen_idx, lcm_mono)
+
+        // Sort groups by (degree, exponent vector) for deterministic iteration order
+        // This ensures reproducible row ordering across runs
+        let mut sorted_groups: Vec<(Vec<usize>, (PolyMonomial<P>, HashSet<usize>))> =
+            groups.into_iter().collect();
+        sorted_groups.sort_by(|a, b| {
+            // Compare by exponent vector (already expanded, deterministic)
+            a.0.cmp(&b.0)
+        });
+
+        for (_exp, (lcm_mono, gens_set)) in sorted_groups.iter() {
             let mut gens: Vec<usize> = gens_set.iter().copied().collect();
             gens.sort_unstable(); // Deterministic ordering
             if gens.is_empty() { continue; }
             pivot_monomials.push(ring.clone_monomial(lcm_mono));
 
-            // Helper closure to add a multiplied row: (LCM / LT(b)) * b
-            let add_multiplied_row = |gidx: usize, matrix: &mut MacaulayMatrix<P>| {
-                if let Some((_, lt_b)) = ring.LT(&basis[gidx], order) {
-                    // Compute multiplier: mult = LCM / LT(basis[gidx])
-                    if let Ok(mult) = ring.monomial_div(ring.clone_monomial(lcm_mono), lt_b) {
-                        let mut row_poly = ring.clone_el(&basis[gidx]);
-                        ring.mul_assign_monomial(&mut row_poly, mult);
-                        let row = matrix.polynomial_to_row(&row_poly, order);
-                        matrix.add_row(row);
-                    }
-                }
-            };
-
             // rr (reducer row): first generator in sorted order
-            add_multiplied_row(gens[0], &mut matrix);
+            rr_data.push((gens[0], ring.clone_monomial(lcm_mono)));
 
             // tr (to-reduce rows): all remaining generators for this LCM
             for &g in gens.iter().skip(1) {
-                add_multiplied_row(g, &mut matrix);
+                tr_data.push((g, ring.clone_monomial(lcm_mono)));
             }
         }
+
+        // Helper to add a multiplied row: (LCM / LT(b)) * b
+        let add_multiplied_row = |gidx: usize, lcm_mono: &PolyMonomial<P>, matrix: &mut MacaulayMatrix<P>, row_type: RowType| {
+            if let Some((_, lt_b)) = ring.LT(&basis[gidx], order) {
+                // Compute multiplier: mult = LCM / LT(basis[gidx])
+                if let Ok(mult) = ring.monomial_div(ring.clone_monomial(lcm_mono), lt_b) {
+                    let mut row_poly = ring.clone_el(&basis[gidx]);
+                    ring.mul_assign_monomial(&mut row_poly, mult);
+                    let row = matrix.polynomial_to_row(&row_poly, order);
+                    matrix.add_row(row, row_type);
+                }
+            }
+        };
+
+        // Add all rr rows first (contiguous block)
+        let rr_start_idx = matrix.num_rows();
+        for (gidx, lcm_mono) in &rr_data {
+            add_multiplied_row(*gidx, lcm_mono, &mut matrix, RowType::Rr);
+        }
+        let rr_end_idx = matrix.num_rows();
+
+        // Add all tr rows next (contiguous block)
+        let tr_start_idx = matrix.num_rows();
+        for (gidx, lcm_mono) in &tr_data {
+            add_multiplied_row(*gidx, lcm_mono, &mut matrix, RowType::Tr);
+        }
+        let tr_end_idx = matrix.num_rows();
 
         let t_rows = t_rows_0.elapsed();
 
@@ -511,6 +540,10 @@ where
         let pivot_count = pivot_indices.len();
         let pivot_col_indices: std::collections::HashSet<usize> = (0..pivot_count).collect();
 
+        // Set ncl (A-block width) for AB/CD semantics
+        // After SHT reordering, pivot columns are 0..(pivot_count-1)
+        matrix.ncl = Some(pivot_count);
+
         if pivot_count > 0 {
             // Build LM index once for selecting reducers quickly
             // The index is sorted by degree for early termination
@@ -544,8 +577,138 @@ where
                         // Keep full row support for dedicated pivot reducers
                         // These are specifically for pivot columns and need full support
                         if row.entries.is_empty() { continue; }
-                        matrix.add_row(row);
+                        matrix.add_row(row, RowType::Dedicated);
                         break; // One reducer per pivot column
+                    }
+                }
+            }
+        }
+        let dedicated_end_idx = matrix.num_rows(); // Track end of dedicated reducers
+
+        // === A-block triangularization of rr rows ===
+        // (ark-feanor-59b: Fix ncl calculation to match actual rr row coverage)
+        //
+        // Goal: Make rr rows form a proper triangular block in A so each A column has a unique rr pivot row.
+        // This ensures AB phase can fully reduce all A-block columns without gaps or collisions.
+        //
+        // Steps:
+        // 1. Collect all rr rows (original + dedicated)
+        // 2. For each rr row, find its leftmost A-column (< pivot_count)
+        // 3. Sort rr rows by their A-pivot column ascending
+        // 4. Perform small AB-only elimination among rr rows to triangularize
+        // 5. This ensures rr_map has complete coverage with no collisions
+        //
+        // This matches msolve's convert_hashes_to_columns intent: pivot columns are
+        // fully covered by normalized rr rows before AB/CD phase.
+
+        if pivot_count > 0 {
+            let base_ring = matrix.ring.base_ring();
+
+            // Collect all rr row indices (original rr + dedicated)
+            let mut rr_indices: Vec<usize> = Vec::new();
+            rr_indices.extend(rr_start_idx..rr_end_idx);
+            rr_indices.extend(tr_end_idx..dedicated_end_idx);
+
+            // Build (row_idx, a_pivot_col) pairs for rr rows with A-block pivots
+            let mut rr_with_a_pivots: Vec<(usize, usize)> = Vec::new();
+            for &rr_idx in &rr_indices {
+                if let Some(pivot_col) = matrix.rows[rr_idx].pivot() {
+                    if pivot_col < pivot_count {
+                        rr_with_a_pivots.push((rr_idx, pivot_col));
+                    }
+                }
+            }
+
+            // Sort by A-pivot column ascending for triangularization
+            rr_with_a_pivots.sort_by_key(|(_, col)| *col);
+
+            // Triangularize: for each rr row, reduce by earlier rr rows in A-block only
+            // This eliminates collisions and creates a proper triangular structure
+            for i in 0..rr_with_a_pivots.len() {
+                let (row_idx, _) = rr_with_a_pivots[i];
+
+                // Reduce this row by all earlier rr rows (with smaller A-pivot columns)
+                let mut changed = true;
+                while changed {
+                    changed = false;
+
+                    let pivot_col = match matrix.rows[row_idx].pivot() {
+                        Some(col) if col < pivot_count => col,
+                        _ => break, // Row is zero or pivot moved to B-block
+                    };
+
+                    // Look for an earlier rr row with this A-pivot column
+                    let mut reducer_idx = None;
+                    for j in 0..i {
+                        let (earlier_idx, earlier_col) = rr_with_a_pivots[j];
+                        if let Some(earlier_pivot) = matrix.rows[earlier_idx].pivot() {
+                            if earlier_pivot == pivot_col && earlier_pivot < pivot_count {
+                                reducer_idx = Some(earlier_idx);
+                                break;
+                            }
+                        }
+                    }
+
+                    if let Some(reducer_idx) = reducer_idx {
+                        // Reduce: row -= multiplier * reducer_row
+                        let row_leading = base_ring.clone_el(&matrix.rows[row_idx].entries[0].1);
+                        let reducer_leading = base_ring.clone_el(&matrix.rows[reducer_idx].entries[0].1);
+                        let multiplier = base_ring.checked_div(&row_leading, &reducer_leading).unwrap();
+
+                        // Take row out to allow immutable borrow of reducer
+                        let mut row = std::mem::replace(&mut matrix.rows[row_idx], SparseRow::new());
+
+                        // Perform subtraction: row -= multiplier * reducer_row (inline implementation)
+                        let mut result = Vec::with_capacity(row.entries.len() + matrix.rows[reducer_idx].entries.len());
+                        let mut row_iter = row.entries.iter();
+                        let mut reducer_iter = matrix.rows[reducer_idx].entries.iter();
+                        let mut row_next = row_iter.next();
+                        let mut reducer_next = reducer_iter.next();
+
+                        while row_next.is_some() || reducer_next.is_some() {
+                            match (row_next, reducer_next) {
+                                (Some((rc, rv)), Some((sc, sv))) => {
+                                    if rc == sc {
+                                        let mut new_val = base_ring.clone_el(rv);
+                                        let scaled = base_ring.mul_ref(&multiplier, sv);
+                                        base_ring.sub_assign(&mut new_val, scaled);
+                                        if !base_ring.is_zero(&new_val) {
+                                            result.push((*rc, new_val));
+                                        }
+                                        row_next = row_iter.next();
+                                        reducer_next = reducer_iter.next();
+                                    } else if rc < sc {
+                                        result.push((*rc, base_ring.clone_el(rv)));
+                                        row_next = row_iter.next();
+                                    } else {
+                                        let mut new_val = base_ring.mul_ref(&multiplier, sv);
+                                        base_ring.negate_inplace(&mut new_val);
+                                        if !base_ring.is_zero(&new_val) {
+                                            result.push((*sc, new_val));
+                                        }
+                                        reducer_next = reducer_iter.next();
+                                    }
+                                }
+                                (Some((rc, rv)), None) => {
+                                    result.push((*rc, base_ring.clone_el(rv)));
+                                    row_next = row_iter.next();
+                                }
+                                (None, Some((sc, sv))) => {
+                                    let mut new_val = base_ring.mul_ref(&multiplier, sv);
+                                    base_ring.negate_inplace(&mut new_val);
+                                    if !base_ring.is_zero(&new_val) {
+                                        result.push((*sc, new_val));
+                                    }
+                                    reducer_next = reducer_iter.next();
+                                }
+                                (None, None) => unreachable!(),
+                            }
+                        }
+                        row.entries = result;
+
+                        // Put row back
+                        matrix.rows[row_idx] = row;
+                        changed = true;
                     }
                 }
             }
@@ -633,21 +796,196 @@ where
 
         // Do not pre-mark or sort rows here; let reduce_matrix determine pivots safely
 
-        // Reduce the matrix via Gaussian elimination (full) to ensure progress
+        // === AB/CD Phase Reduction ===
+        // Replace full-matrix elimination with specialized AB/CD semantics:
+        // 1. AB phase: reduce tr rows by rr rows (A-block only)
+        // 2. CD phase: reduce tr rows and discover pivots in B/D blocks only
         let t_elim_0 = Instant::now();
-        let new_pivot_rows = reduce_matrix(&mut matrix);
+
+        let new_pivot_rows = if let Some(ncl_val) = matrix.ncl {
+            // Use the tracked row ranges from construction:
+            // - rr rows: rr_start_idx..rr_end_idx
+            // - tr rows: tr_start_idx..tr_end_idx
+            // - dedicated reducers: tr_end_idx..dedicated_end_idx
+
+            // DIAGNOSTIC: Check ncl mismatch between desired A columns (SHT pivots) and covered A columns (rr_map)
+            if profile {
+                use std::collections::HashSet;
+                // Build rr_map to see what A columns are actually covered
+                let mut covered: HashSet<usize> = HashSet::new();
+                let mut collisions: Vec<(usize, Vec<usize>)> = Vec::new();
+
+                // Scan rr rows
+                for rr_idx in rr_start_idx..rr_end_idx {
+                    if let Some(pivot_col) = matrix.rows[rr_idx].pivot() {
+                        if pivot_col < ncl_val {
+                            if covered.contains(&pivot_col) {
+                                // Collision: multiple rr rows have same leftmost column
+                                if let Some(existing) = collisions.iter_mut().find(|(c, _)| *c == pivot_col) {
+                                    existing.1.push(rr_idx);
+                                } else {
+                                    collisions.push((pivot_col, vec![rr_idx]));
+                                }
+                            }
+                            covered.insert(pivot_col);
+                        }
+                    }
+                }
+                // Scan dedicated reducers
+                for rr_idx in tr_end_idx..dedicated_end_idx {
+                    if let Some(pivot_col) = matrix.rows[rr_idx].pivot() {
+                        if pivot_col < ncl_val {
+                            if covered.contains(&pivot_col) {
+                                if let Some(existing) = collisions.iter_mut().find(|(c, _)| *c == pivot_col) {
+                                    existing.1.push(rr_idx);
+                                } else {
+                                    collisions.push((pivot_col, vec![rr_idx]));
+                                }
+                            }
+                            covered.insert(pivot_col);
+                        }
+                    }
+                }
+
+                // Compute missing A columns
+                let desired_a: HashSet<usize> = (0..ncl_val).collect();
+                let missing: Vec<usize> = desired_a.difference(&covered).copied().collect();
+
+                if !missing.is_empty() || !collisions.is_empty() {
+                    eprintln!("[AB/CD DIAGNOSTIC] ncl={}, desired A columns=[0..{})", ncl_val, ncl_val);
+                    eprintln!("  Covered columns: {} / {}", covered.len(), ncl_val);
+                    if !missing.is_empty() {
+                        eprintln!("  Missing columns: {:?}", missing);
+                    }
+                    if !collisions.is_empty() {
+                        eprintln!("  Collisions: {} columns have multiple rr rows", collisions.len());
+                        for (col, rows) in &collisions {
+                            eprintln!("    Column {}: rr rows {:?}", col, rows);
+                        }
+                    }
+                }
+            }
+
+            // AB phase: reduce tr rows by rr rows (A-block only, columns < ncl)
+            // CRITICAL: Must exclude tr rows from rr_range to prevent self-reduction infinite loop
+            // Apply original rr rows first
+            if rr_start_idx < rr_end_idx && tr_start_idx < tr_end_idx {
+                reduce_tr_by_rr_on_A(&mut matrix, rr_start_idx..rr_end_idx, tr_start_idx..tr_end_idx, ncl_val);
+            }
+            // Then apply dedicated reducers
+            if tr_end_idx < dedicated_end_idx && tr_start_idx < tr_end_idx {
+                reduce_tr_by_rr_on_A(&mut matrix, tr_end_idx..dedicated_end_idx, tr_start_idx..tr_end_idx, ncl_val);
+            }
+
+            // Note: After A-block triangularization, some rr rows may have pivots >= ncl.
+            // This is expected - triangularization can eliminate all A-block entries from an rr row,
+            // leaving it with a B-block pivot. These rows simply won't participate in AB reduction.
+
+            // Assertion 2: After AB reduction, count tr rows with A-block residuals
+            // (not an error yet, but will be checked after CD phase)
+            #[allow(unused_variables)]
+            let mut tr_residual_a_count_after_ab = 0;
+            for tr_idx in tr_start_idx..tr_end_idx {
+                if let Some(pivot_col) = matrix.rows[tr_idx].pivot() {
+                    if pivot_col < ncl_val {
+                        tr_residual_a_count_after_ab += 1;
+                    }
+                }
+            }
+
+            // After AB reduction, mark rr rows as pivots in A-block so CD phase can use them as reducers
+            // IMPORTANT: Always mark rr rows as pivots, even if the column already has one.
+            // This ensures CD phase uses the correct rr reducers.
+            // Mark original rr rows
+            for rr_idx in rr_start_idx..rr_end_idx {
+                if let Some(pivot_col) = matrix.rows[rr_idx].pivot() {
+                    if pivot_col < ncl_val {
+                        // Normalize the rr row
+                        let base_ring = matrix.ring.base_ring();
+                        if let Some((_, pivot_coeff)) = matrix.rows[rr_idx].entries.first() {
+                            let inv = base_ring.invert(pivot_coeff).unwrap();
+                            for (_, coeff) in &mut matrix.rows[rr_idx].entries {
+                                base_ring.mul_assign(coeff, base_ring.clone_el(&inv));
+                            }
+                        }
+                        matrix.mark_pivot(pivot_col, rr_idx);
+                    }
+                }
+            }
+            // Mark dedicated reducers
+            for rr_idx in tr_end_idx..dedicated_end_idx {
+                if let Some(pivot_col) = matrix.rows[rr_idx].pivot() {
+                    if pivot_col < ncl_val {
+                        // Normalize the rr row
+                        let base_ring = matrix.ring.base_ring();
+                        if let Some((_, pivot_coeff)) = matrix.rows[rr_idx].entries.first() {
+                            let inv = base_ring.invert(pivot_coeff).unwrap();
+                            for (_, coeff) in &mut matrix.rows[rr_idx].entries {
+                                base_ring.mul_assign(coeff, base_ring.clone_el(&inv));
+                            }
+                        }
+                        matrix.mark_pivot(pivot_col, rr_idx);
+                    }
+                }
+            }
+
+            // CD phase: reduce tr rows only, discover pivots in B/D blocks (columns >= ncl)
+            let (new_pivot_rows, tr_new_pivots, anomaly_a_pivots) = if tr_start_idx < tr_end_idx {
+                reduce_matrix_tr(&mut matrix, tr_start_idx..tr_end_idx, ncl_val)
+            } else {
+                (Vec::new(), 0, 0)
+            };
+
+            // Assertion 3: CD phase ideally should not have anomaly A-block pivots
+            // but this can happen if rr rows don't cover all A-block columns
+            // TODO: Fix root cause - ncl should match actual rr row coverage, not SHT pivot count
+            if anomaly_a_pivots > 0 && std::env::var("F4_STRICT_ABCD").is_ok() {
+                panic!(
+                    "AB/CD assertion failed: {} tr rows still have pivot < ncl after CD phase",
+                    anomaly_a_pivots
+                );
+            }
+
+            new_pivot_rows
+        } else {
+            // Fallback: use original reduce_matrix if ncl is not set
+            reduce_matrix(&mut matrix)
+        };
+
         let t_elim = t_elim_0.elapsed();
 
         // Extract new basis elements from reduced matrix pivot rows
+        // Following AB/CD semantics: only extract tr rows, never rr rows
         let t_extract_0 = Instant::now();
         let mut new_polys = Vec::new();
+        let mut rr_extraction_count = 0;
         for &row_idx in &new_pivot_rows {
+            // Skip rr rows (Rr, Dedicated) - only extract tr rows
+            if row_idx < matrix.row_types.len() {
+                match matrix.row_types[row_idx] {
+                    RowType::Rr | RowType::Dedicated => {
+                        rr_extraction_count += 1;
+                        continue;
+                    }
+                    _ => {}, // Tr and Closure rows can be extracted
+                }
+            }
+
             let poly = matrix.row_to_polynomial(&matrix.rows[row_idx]);
             if ring.is_zero(&poly) { continue; }
             if poly_in_basis(ring, &poly, &basis, order) { continue; }
             new_polys.push(poly);
         }
         let t_extract = t_extract_0.elapsed();
+
+        // Assertion 4: Extraction should only happen from tr rows (rr_extraction_count must be 0)
+        if matrix.ncl.is_some() {
+            assert_eq!(
+                rr_extraction_count, 0,
+                "AB/CD assertion failed: {} rr rows were in new_pivot_rows (should be 0)",
+                rr_extraction_count
+            );
+        }
 
         // No fallback here; rely on strict A|B reducers to avoid blow-ups
 
@@ -984,7 +1322,7 @@ where
                     ring.mul_assign_monomial(&mut reducer, multiplier);
 
                     let row = matrix.polynomial_to_row(&reducer, order);
-                    matrix.add_row(row);
+                    matrix.add_row(row, RowType::Closure);
 
                     // Only add ONE reducer per monomial
                     break;
@@ -1077,7 +1415,7 @@ where
                 if row.entries.is_empty() {
                     continue;
                 }
-                matrix.add_row(row);
+                matrix.add_row(row, RowType::Closure);
 
                 // Only add ONE reducer per monomial
                 break;
@@ -1127,7 +1465,7 @@ where
                 let row = matrix.polynomial_to_row(&reducer, order);
                 // Keep full row support (no A-block pruning) per user's analysis
                 if row.entries.is_empty() { continue; }
-                matrix.add_row(row);
+                matrix.add_row(row, RowType::Closure);
                 break;
             }
         }

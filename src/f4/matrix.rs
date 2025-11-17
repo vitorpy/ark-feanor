@@ -53,6 +53,19 @@ impl<F> SparseRow<F> {
     }
 }
 
+/// Type of row in the Macaulay matrix for AB/CD semantics
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowType {
+    /// Reducer row (rr): first generator per LCM group, forms A-block reducers
+    Rr,
+    /// To-reduce row (tr): remaining generators per LCM group, reduced by rr rows
+    Tr,
+    /// Dedicated reducer: added explicitly for pivot columns
+    Dedicated,
+    /// Closure reducer: added during symbolic closure
+    Closure,
+}
+
 /// Macaulay matrix for F4 algorithm
 ///
 /// The matrix is stored in sparse row format. Each row corresponds to either:
@@ -80,6 +93,13 @@ where
     /// Pivot columns (columns with known reducers)
     /// pivot_rows[col] = Some(row_index) if column `col` has a pivot in `row_index`
     pub pivot_rows: Vec<Option<usize>>,
+
+    /// Row types for AB/CD semantics (tracks which rows are rr vs tr)
+    pub row_types: Vec<RowType>,
+
+    /// A-block width (number of pivot LCM columns) after SHT reordering
+    /// Set after reorder_columns_with_sht; used for AB/CD phase boundary
+    pub ncl: Option<usize>,
 }
 
 impl<P> MacaulayMatrix<P>
@@ -95,6 +115,8 @@ where
             col_to_monomial: Vec::new(),
             monomial_to_col: HashMap::new(),
             pivot_rows: Vec::new(),
+            row_types: Vec::new(),
+            ncl: None,
         }
     }
 
@@ -137,10 +159,11 @@ where
         row
     }
 
-    /// Add a row to the matrix
-    pub fn add_row(&mut self, row: SparseRow<PolyCoeff<P>>) -> usize {
+    /// Add a row to the matrix with specified row type
+    pub fn add_row(&mut self, row: SparseRow<PolyCoeff<P>>, row_type: RowType) -> usize {
         let row_idx = self.rows.len();
         self.rows.push(row);
+        self.row_types.push(row_type);
         row_idx
     }
 
@@ -210,6 +233,33 @@ where
                 }
             }
         }
+
+        // Sort pivot and reducer columns deterministically to eliminate HashMap iteration order effects
+        // This ensures reproducible column ordering across runs, which is critical for debugging
+        // Sort by (degree, expanded monomial) to match msolve's deterministic ordering
+        piv.sort_unstable_by(|&a, &b| {
+            let mono_a = &self.col_to_monomial[a];
+            let mono_b = &self.col_to_monomial[b];
+            let deg_a = self.ring.monomial_deg(mono_a);
+            let deg_b = self.ring.monomial_deg(mono_b);
+            deg_a.cmp(&deg_b).then_with(|| {
+                let exp_a = self.ring.expand_monomial(mono_a);
+                let exp_b = self.ring.expand_monomial(mono_b);
+                exp_a.cmp(&exp_b)
+            })
+        });
+
+        red.sort_unstable_by(|&a, &b| {
+            let mono_a = &self.col_to_monomial[a];
+            let mono_b = &self.col_to_monomial[b];
+            let deg_a = self.ring.monomial_deg(mono_a);
+            let deg_b = self.ring.monomial_deg(mono_b);
+            deg_a.cmp(&deg_b).then_with(|| {
+                let exp_a = self.ring.expand_monomial(mono_a);
+                let exp_b = self.ring.expand_monomial(mono_b);
+                exp_a.cmp(&exp_b)
+            })
+        });
 
         let mut tails: Vec<usize> = Vec::new();
         for col in 0..ncols {
