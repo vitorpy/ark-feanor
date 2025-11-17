@@ -46,6 +46,21 @@ where
     new_pivot_rows
 }
 
+/// Reduce a set of rows by the currently known pivot rows only.
+///
+/// Unlike `reduce_matrix`, this does not mark new pivot rows. It only
+/// performs reductions against existing entries in `matrix.pivot_rows`.
+pub fn reduce_by_existing_pivots<P>(matrix: &mut MacaulayMatrix<P>, row_range: std::ops::Range<usize>)
+where
+    P: RingStore + Copy,
+    P::Type: MultivariatePolyRing,
+    <<P::Type as RingExtension>::BaseRing as RingStore>::Type: Field,
+{
+    for row_idx in row_range {
+        reduce_row_by_pivots(matrix, row_idx);
+    }
+}
+
 /// Reduce a single row by all known pivot rows
 fn reduce_row_by_pivots<P>(matrix: &mut MacaulayMatrix<P>, row_idx: usize)
 where

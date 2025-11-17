@@ -459,10 +459,24 @@ where
         let mut seen = std::collections::HashSet::new();
         pivot_indices.retain(|c| seen.insert(*c));
 
-        // TEMPORARILY DISABLED: Column reordering for debugging
-        // Always reorder when we have at least one pivot column (SHT-driven, msolve-aligned)
-        // SHT timing: update with rr/tr monomials BEFORE reordering (ark-feanor-63y)
+        // === SHT-driven A|B column mapping (ark-feanor-fok) ===
+        //
+        // This implements msolve's convert_hashes_to_columns behavior, where columns are
+        // reordered to separate the matrix into A and B blocks:
+        //   - A block (pivots): idx=2 columns (S-polynomial LCMs)
+        //   - B block (reducers): idx=1 columns (monomials from rr/tr and closure)
+        //   - Tail block: remaining columns
+        //
+        // This ordering is critical for efficient Gaussian elimination:
+        //   1. Pivots are discovered early (leftmost columns)
+        //   2. Reducer monomials come next (likely to be reduced)
+        //   3. Tails come last (less likely to become pivots)
+        //
+        // SHT timing (ark-feanor-63y): Update SHT with rr/tr monomials BEFORE reordering
+        // to ensure the SHT reflects all monomials that will be present in the matrix.
+
         let t_reorder_0 = Instant::now();
+        // TEMPORARILY DISABLED FOR DEBUGGING
         if false && !pivot_indices.is_empty() {
             // Fill SHT with current rr/tr monomials as idx=1 before mapping
             // This ensures all monomials from rr/tr rows are tracked before column reordering
@@ -475,18 +489,34 @@ where
                 }
             }
             // Reorder columns using SHT: idx=2 (pivots) first, then idx=1, then tails
+            // This creates the A|B split that msolve uses for optimized elimination
             matrix.reorder_columns_with_sht(&sht_idx);
         }
         let t_reorder = t_reorder_0.elapsed();
 
         // After reordering, pivot columns are now the first `pivot_count` indices.
         // Add one dedicated reducer row per pivot column to anchor the pivot.
+        // === SHT-driven symbolic closure - Part 1: Dedicated reducers for pivot columns ===
+        // (ark-feanor-1w9: SHT-driven symbolic closure)
+        //
+        // This implements msolve-style symbolic preprocessing where we add exactly one reducer
+        // per pivot column (LCM column from S-pairs). This corresponds to the A-block setup
+        // in msolve's symbolic_preprocessing (symbol.c).
+        //
+        // Key properties:
+        // - One reducer per pivot column (skip if no suitable basis element found)
+        // - Uses LM index with degree prefiltering for fast reducer selection
+        // - Restricts reducer rows to A-block only (entries < pivot_count) to avoid tail growth
+        // - Follows msolve's strategy of building a well-structured A-block before elimination
+
         let pivot_count = pivot_indices.len();
         let pivot_col_indices: std::collections::HashSet<usize> = (0..pivot_count).collect();
 
         if pivot_count > 0 {
             // Build LM index once for selecting reducers quickly
+            // The index is sorted by degree for early termination
             let lm_index = build_lm_index(ring, &basis, order);
+
             for pi in 0..pivot_count {
                 let pivot_col = pi; // after reorder, first pivot_count columns are pivots
                 // Clone monomial to avoid holding an immutable borrow of matrix across mutations
@@ -494,41 +524,65 @@ where
                 let pivot_deg = ring.monomial_deg(&pivot_mono);
                 let pivot_exp = ring.expand_monomial(&pivot_mono);
 
-                // Find a basis LM dividing the pivot monomial
+                // Find the FIRST basis LM dividing the pivot monomial using degree prefiltering
                 for entry in &lm_index {
+                    // Degree prefilter: if basis LM degree > pivot degree, no division possible
                     if entry.degree > pivot_deg { break; }
-                    // quick per-variable check
+
+                    // Quick per-variable bounds check before expensive monomial_div
                     let mut ok = true;
                     for (a, b) in entry.exponents.iter().zip(pivot_exp.iter()) {
                         if a > b { ok = false; break; }
                     }
                     if !ok { continue; }
+
                     if let Ok(mult) = ring.monomial_div(ring.clone_monomial(&pivot_mono), &entry.lm) {
-                        // (pivot / LM(b)) * b as reducer row
+                        // Add reducer: (pivot / LM(b)) * b as a new row
                         let mut reducer = ring.clone_el(&basis[entry.basis_idx]);
                         ring.mul_assign_monomial(&mut reducer, mult);
                         let mut row = matrix.polynomial_to_row(&reducer, order);
-                        // Keep only A-block entries to avoid tail growth
+
+                        // CRITICAL: Keep only A-block entries to avoid tail growth
+                        // This is essential for msolve alignment - reducer rows should not
+                        // introduce new tail columns during symbolic preprocessing
                         row.entries.retain(|(c, _)| *c < pivot_count);
                         if row.entries.is_empty() { continue; }
                         matrix.add_row(row);
-                        break;
+                        break; // One reducer per pivot column
                     }
                 }
             }
         }
 
-        // Add reducers (basis multiples) to matrix, skipping pivot columns.
-        // Only add reducers for columns present in rr/tr rows (to-be-reduced part).
+        // === SHT-driven symbolic closure - Part 2: Bounded closure loop ===
+        // (ark-feanor-1w9 continued)
+        //
+        // This performs bounded symbolic closure to add reducers for columns discovered
+        // during rr/tr construction. Unlike unbounded closure which can blow up matrix size,
+        // we use strict bounds matching msolve's behavior:
+        //
+        // 1. Collect target columns from rr/tr rows and update SHT with idx=1
+        // 2. Run closure loop with bounded passes (max 2)
+        // 3. Exit early if no new rows/cols added
+        // 4. Skip pivot columns (they already have dedicated reducers)
+        //
+        // This prevents exponential growth while ensuring adequate symbolic preprocessing
+        // for the Gaussian elimination phase.
+
         let reducers_before_rows = matrix.num_rows();
         let reducers_before_cols = matrix.num_cols();
         let t_reducers_0 = Instant::now();
         let s_rows = reducers_before_rows; // rows added so far are rr/tr rows
+
         // Collect target columns from rr/tr rows and update SHT idx=1
+        // The SHT (secondary hash table) tracks monomial roles:
+        //   idx=2: pivot LCMs (S-polynomial LCMs)
+        //   idx=1: reducer monomials (from rr/tr and closure)
         let mut target_cols: std::collections::HashSet<usize> = std::collections::HashSet::new();
         for r in 0..s_rows {
             for (c, _) in &matrix.rows[r].entries {
                 target_cols.insert(*c);
+                // Update SHT: mark this monomial as a reducer (idx=1) if not already present
                 let exp = ring.expand_monomial(&matrix.col_to_monomial[*c]);
                 if !sht_idx.contains_key(&exp) {
                     sht_idx.insert(exp, 1);
@@ -536,14 +590,18 @@ where
             }
         }
 
-        // Build LM index once
+        // Build LM index once for fast reducer selection during closure
         let lm_index = build_lm_index(ring, &basis, order);
+
         // Bounded closure: up to 2 passes or until rows/cols stop changing
+        // This aligns with msolve's bounded symbolic preprocessing strategy
         let mut passes = 0usize;
         let max_passes = 2usize;
         loop {
             let rows_before = matrix.num_rows();
             let cols_before = matrix.num_cols();
+
+            // Add reducers for target columns, skipping pivot columns
             add_reducers_for_columns_with_pivot_skip(
                 &mut matrix,
                 &basis,
@@ -553,7 +611,12 @@ where
                 &target_cols,
                 &lm_index,
             );
+
             passes += 1;
+
+            // Exit conditions:
+            // 1. Reached maximum passes (prevents unbounded growth)
+            // 2. No new rows or columns added (closure has stabilized)
             if passes >= max_passes || (matrix.num_rows() == rows_before && matrix.num_cols() == cols_before) {
                 break;
             }

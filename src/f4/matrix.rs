@@ -7,7 +7,7 @@
 
 use feanor_math::ring::*;
 use feanor_math::rings::multivariate::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// A sparse row in the Macaulay matrix
 ///
@@ -187,6 +187,80 @@ where
         self.pivot_rows.get(col).and_then(|&r| r)
     }
 
+    /// Reorder columns using an SHT-like index: entries with idx==2 (pivots)
+    /// come first, then idx==1, then the remaining columns in their current order.
+    /// The `sht_idx` map uses expanded monomials as keys.
+    pub fn reorder_columns_with_sht(&mut self, sht_idx: &HashMap<Vec<usize>, u8>) {
+        let ncols = self.col_to_monomial.len();
+        if ncols == 0 || sht_idx.is_empty() {
+            return;
+        }
+
+        // Build lists of columns by idx class
+        let mut piv: Vec<usize> = Vec::new();
+        let mut red: Vec<usize> = Vec::new();
+        let mut seen: Vec<bool> = vec![false; ncols];
+
+        for (exp, idx) in sht_idx {
+            if let Some(&col) = self.monomial_to_col.get(exp) {
+                match *idx {
+                    2 => { piv.push(col); seen[col] = true; },
+                    1 => { red.push(col); seen[col] = true; },
+                    _ => {},
+                }
+            }
+        }
+
+        let mut tails: Vec<usize> = Vec::new();
+        for col in 0..ncols {
+            if !seen[col] { tails.push(col); }
+        }
+
+        // Build new order: pivots, reducers, then tails
+        let mut new_order: Vec<usize> = Vec::with_capacity(ncols);
+        new_order.extend_from_slice(&piv);
+        new_order.extend_from_slice(&red);
+        new_order.extend_from_slice(&tails);
+
+        // Map old -> new
+        let mut old_to_new = vec![0usize; ncols];
+        for (new_col, &old_col) in new_order.iter().enumerate() {
+            old_to_new[old_col] = new_col;
+        }
+
+        // Remap rows and re-sort by new column indices
+        // Note: sorting is necessary because column remapping is not order-preserving
+        // (pivots→first, reducers→middle, tails→last reordering changes the order)
+        for row in &mut self.rows {
+            for (col, _) in &mut row.entries {
+                *col = old_to_new[*col];
+            }
+            // Use sort_unstable_by_key for better performance (stability not needed)
+            row.entries.sort_unstable_by_key(|(col, _)| *col);
+        }
+
+        // Reorder col_to_monomial and rebuild monomial_to_col
+        let mut new_cols: Vec<PolyMonomial<P>> = Vec::with_capacity(ncols);
+        for &old_col in &new_order {
+            new_cols.push(self.ring.clone_monomial(&self.col_to_monomial[old_col]));
+        }
+        self.col_to_monomial = new_cols;
+
+        self.monomial_to_col.clear();
+        self.monomial_to_col.reserve(ncols);
+        for (new_col, m) in self.col_to_monomial.iter().enumerate() {
+            let em = self.ring.expand_monomial(m);
+            self.monomial_to_col.insert(em, new_col);
+        }
+
+        // Remap pivot_rows
+        let mut new_pivot_rows = vec![None; ncols];
+        for (old_col, opt_row) in self.pivot_rows.iter().enumerate() {
+            new_pivot_rows[old_to_new[old_col]] = *opt_row;
+        }
+        self.pivot_rows = new_pivot_rows;
+    }
+
     /// Reorder columns so pivot monomials come first
     ///
     /// This implements the A|B split from msolve: columns corresponding to S-poly LCMs
@@ -256,6 +330,153 @@ where
             .iter()
             .map(|&old_col| old_pivot_rows[old_col])
             .collect();
+    }
+
+    /// Reorder columns so that the provided pivot monomials come first.
+    ///
+    /// This mimics the A|B split used by optimized F4 implementations: columns
+    /// corresponding to LCMs of selected S-polynomials are placed first, which
+    /// improves reducer effectiveness and elimination locality.
+    pub fn reorder_columns_with_pivots(&mut self, pivot_monomials: &[PolyMonomial<P>]) {
+        if self.col_to_monomial.is_empty() || pivot_monomials.is_empty() {
+            return;
+        }
+
+        // Build a set of expanded pivot monomials for quick membership tests
+        let mut pivot_set: HashSet<Vec<usize>> = HashSet::with_capacity(pivot_monomials.len());
+        for m in pivot_monomials {
+            pivot_set.insert(self.ring.expand_monomial(m));
+        }
+
+        // Determine new column order: first pivot columns, then the rest
+        let ncols = self.col_to_monomial.len();
+        let mut pivots: Vec<usize> = Vec::new();
+        let mut tails: Vec<usize> = Vec::new();
+        for col in 0..ncols {
+            let em = self.ring.expand_monomial(&self.col_to_monomial[col]);
+            if pivot_set.contains(&em) {
+                pivots.push(col);
+            } else {
+                tails.push(col);
+            }
+        }
+
+        // If nothing to reorder, exit early
+        if pivots.is_empty() {
+            return;
+        }
+
+        let mut old_to_new = vec![0usize; ncols];
+        let mut new_order: Vec<usize> = Vec::with_capacity(ncols);
+        for (i, &c) in pivots.iter().enumerate() {
+            old_to_new[c] = i;
+            new_order.push(c);
+        }
+        for (k, &c) in tails.iter().enumerate() {
+            let idx = pivots.len() + k;
+            old_to_new[c] = idx;
+            new_order.push(c);
+        }
+
+        // Remap rows and re-sort by new column indices
+        for row in &mut self.rows {
+            for (col, _) in &mut row.entries {
+                *col = old_to_new[*col];
+            }
+            // Use sort_unstable_by_key for better performance (stability not needed)
+            row.entries.sort_unstable_by_key(|(col, _)| *col);
+        }
+
+        // Reorder col_to_monomial and rebuild monomial_to_col
+        let mut new_cols: Vec<PolyMonomial<P>> = Vec::with_capacity(ncols);
+        for &old_col in &new_order {
+            new_cols.push(self.ring.clone_monomial(&self.col_to_monomial[old_col]));
+        }
+        self.col_to_monomial = new_cols;
+
+        self.monomial_to_col.clear();
+        self.monomial_to_col.reserve(ncols);
+        for (new_col, m) in self.col_to_monomial.iter().enumerate() {
+            let em = self.ring.expand_monomial(m);
+            self.monomial_to_col.insert(em, new_col);
+        }
+
+        // Remap pivot_rows to the new order
+        let mut new_pivot_rows = vec![None; ncols];
+        for (old_col, opt_row) in self.pivot_rows.iter().enumerate() {
+            let new_col = old_to_new[old_col];
+            new_pivot_rows[new_col] = *opt_row;
+        }
+        self.pivot_rows = new_pivot_rows;
+    }
+
+    /// Reorder columns so that the provided pivot column indices come first.
+    ///
+    /// This variant avoids monomial expansion and works directly with known
+    /// column indices of pivot (LCM) monomials.
+    pub fn reorder_columns_with_pivot_indices(&mut self, pivot_indices: &[usize]) {
+        let ncols = self.col_to_monomial.len();
+        if ncols == 0 || pivot_indices.is_empty() {
+            return;
+        }
+
+        // Build a boolean marker array and an ordered unique list of pivots
+        let mut is_pivot = vec![false; ncols];
+        let mut piv: Vec<usize> = Vec::new();
+        piv.reserve(pivot_indices.len());
+        for &c in pivot_indices {
+            if c < ncols && !is_pivot[c] {
+                is_pivot[c] = true;
+                piv.push(c);
+            }
+        }
+        if piv.is_empty() {
+            return;
+        }
+
+        // Build new column order: pivots (in given order) followed by tails
+        let mut new_order: Vec<usize> = Vec::with_capacity(ncols);
+        new_order.extend_from_slice(&piv);
+        for col in 0..ncols {
+            if !is_pivot[col] {
+                new_order.push(col);
+            }
+        }
+
+        // Map old -> new
+        let mut old_to_new = vec![0usize; ncols];
+        for (new_col, &old_col) in new_order.iter().enumerate() {
+            old_to_new[old_col] = new_col;
+        }
+
+        // Remap rows
+        for row in &mut self.rows {
+            for (col, _) in &mut row.entries {
+                *col = old_to_new[*col];
+            }
+            row.sort();
+        }
+
+        // Reorder col_to_monomial and rebuild monomial_to_col
+        let mut new_cols: Vec<PolyMonomial<P>> = Vec::with_capacity(ncols);
+        for &old_col in &new_order {
+            new_cols.push(self.ring.clone_monomial(&self.col_to_monomial[old_col]));
+        }
+        self.col_to_monomial = new_cols;
+
+        self.monomial_to_col.clear();
+        self.monomial_to_col.reserve(ncols);
+        for (new_col, m) in self.col_to_monomial.iter().enumerate() {
+            let em = self.ring.expand_monomial(m);
+            self.monomial_to_col.insert(em, new_col);
+        }
+
+        // Remap pivot_rows
+        let mut new_pivot_rows = vec![None; ncols];
+        for (old_col, opt_row) in self.pivot_rows.iter().enumerate() {
+            new_pivot_rows[old_to_new[old_col]] = *opt_row;
+        }
+        self.pivot_rows = new_pivot_rows;
     }
 }
 
