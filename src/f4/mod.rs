@@ -586,10 +586,9 @@ where
                         // Add reducer: (pivot / LM(b)) * b as a new row
                         let mut reducer = ring.clone_el(&basis[entry.basis_idx]);
                         ring.mul_assign_monomial(&mut reducer, mult);
-                        let row = matrix.polynomial_to_row(&reducer, order);
-
-                        // Keep full row support for dedicated pivot reducers
-                        // These are specifically for pivot columns and need full support
+                        let mut row = matrix.polynomial_to_row(&reducer, order);
+                        // A-only support for dedicated pivot reducers to limit B/D tail growth
+                        row.entries.retain(|(c, _)| *c < pivot_count);
                         if row.entries.is_empty() { continue; }
                         matrix.add_row(row, RowType::Dedicated);
                         break; // One reducer per pivot column
@@ -790,10 +789,11 @@ where
         // Column signature cache to avoid recomputing MonSig for same columns
         let mut col_sig_cache: std::collections::HashMap<usize, (usize, Vec<usize>, MonSig)> = std::collections::HashMap::new();
 
-        // Bounded closure: up to 2 passes or until rows/cols stop changing
+        // Bounded closure: up to 1–2 passes depending on size, or until rows/cols stop changing
         // This aligns with msolve's bounded symbolic preprocessing strategy
         let mut passes = 0usize;
-        let max_passes = 2usize;
+        let mut max_passes = 2usize;
+        if matrix.num_cols() > 1000 { max_passes = 1; }
         loop {
             let rows_before = matrix.num_rows();
             let cols_before = matrix.num_cols();
@@ -1025,9 +1025,32 @@ where
                 }
             }
 
-            let poly = matrix.row_to_polynomial(&matrix.rows[row_idx]);
+            let mut poly = matrix.row_to_polynomial(&matrix.rows[row_idx]);
             if ring.is_zero(&poly) { continue; }
-            if poly_in_basis(ring, &poly, &basis, order) { continue; }
+            // Reduce extracted polynomial by current basis to avoid growing the final set
+            {
+                // Simple loop: while some reducer divides LT(poly), apply one-step reduction
+                'reduce_new: loop {
+                    let (plc, plm) = match ring.LT(&poly, order) { Some(lt) => lt, None => break };
+                    let mut reduced_once = false;
+                    for b in &basis {
+                        if let Some((rlc, rlm)) = ring.LT(b, order) {
+                            if let Ok(qm) = ring.monomial_div(ring.clone_monomial(plm), rlm) {
+                                let scalar = ring.base_ring().checked_div(plc, rlc).unwrap();
+                                let mut red = ring.clone_el(b);
+                                ring.mul_assign_monomial(&mut red, qm);
+                                ring.inclusion().mul_assign_ref_map(&mut red, &scalar);
+                                ring.sub_assign(&mut poly, red);
+                                reduced_once = true;
+                                break;
+                            }
+                        }
+                    }
+                    if !reduced_once { break 'reduce_new; }
+                }
+            }
+            if ring.is_zero(&poly) { continue; }
+            if poly_in_basis(ring, &poly, order, &basis) { continue; }
             new_polys.push(poly);
         }
         let t_extract = t_extract_0.elapsed();
@@ -1591,8 +1614,9 @@ where
             if let Ok(multiplier) = ring.monomial_div(ring.clone_monomial(&matrix.col_to_monomial[col]), &entry.lm) {
                 let mut reducer = ring.clone_el(&basis[entry.basis_idx]);
                 ring.mul_assign_monomial(&mut reducer, multiplier);
-                let row = matrix.polynomial_to_row(&reducer, order);
-                // Keep full row support (no A-block pruning) per user's analysis
+                let mut row = matrix.polynomial_to_row(&reducer, order);
+                // A-only row support to cap fill-in: drop entries beyond A-block
+                row.entries.retain(|(c, _)| *c < pivot_count);
                 if row.entries.is_empty() { continue; }
                 matrix.add_row(row, RowType::Closure);
                 break;
@@ -1605,7 +1629,7 @@ where
 ///
 /// A polynomial is redundant if its leading monomial EXACTLY matches
 /// an existing basis element's leading monomial (not just divisible by).
-fn poly_in_basis<P, O>(ring: P, poly: &El<P>, basis: &[El<P>], order: O) -> bool
+fn poly_in_basis<P, O>(ring: P, poly: &El<P>, order: O, basis: &[El<P>]) -> bool
 where
     P: RingStore + Copy,
     P::Type: MultivariatePolyRing,

@@ -154,7 +154,7 @@ fn main() {
     //run_comparison(6, false);
 
     // Size 7 (large)
-    run_comparison(7, false);
+    run_comparison(9, false);
 
     println!("Test complete!");
 }
