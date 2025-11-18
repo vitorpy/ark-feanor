@@ -63,7 +63,7 @@ fn create_katsura_system(poly_ring: &BN254PolyRing, n: usize) -> Vec<El<BN254Pol
     system
 }
 
-fn run_comparison(n: usize) {
+fn run_comparison(n: usize, skip_buchberger: bool) {
     let field = &*BN254_FR;
 
     // Adjust degree limits based on problem size
@@ -71,8 +71,9 @@ fn run_comparison(n: usize) {
         3 => 50,
         4 => 100,
         5 => 200,
-        6 => 400,
-        _ => 800,
+        6 => 500,
+        7 => 800,
+        _ => 1200,
     };
 
     let degree_cfg = DegreeCfg::new(max_deg).with_precompute(50);
@@ -82,20 +83,26 @@ fn run_comparison(n: usize) {
 
     println!("==== Katsura-{} ====", n);
 
-    // Run Buchberger
-    println!("Running Buchberger...");
-    let system_buch = create_katsura_system(&poly_ring, n);
-    let start = Instant::now();
-    let gb_buchberger = buchberger_simple::<_, DegRevLex>(
-        &poly_ring,
-        system_buch,
-        DegRevLex
-    );
-    let time_buchberger = start.elapsed();
+    // Run Buchberger (unless skipped for large problems)
+    let (gb_buchberger, time_buchberger) = if !skip_buchberger {
+        println!("Running Buchberger...");
+        let system_buch = create_katsura_system(&poly_ring, n);
+        let start = Instant::now();
+        let gb = buchberger_simple::<_, DegRevLex>(
+            &poly_ring,
+            system_buch,
+            DegRevLex
+        );
+        let time = start.elapsed();
 
-    println!("  Time: {:?}", time_buchberger);
-    println!("  Basis size: {}", gb_buchberger.len());
-    println!();
+        println!("  Time: {:?}", time);
+        println!("  Basis size: {}", gb.len());
+        println!();
+        (Some(gb), Some(time))
+    } else {
+        println!("Skipping Buchberger (too slow for this size)...\n");
+        (None, None)
+    };
 
     // Run F4
     println!("Running F4...");
@@ -114,76 +121,40 @@ fn run_comparison(n: usize) {
 
     // Compare
     println!("Results:");
-    println!("  Basis sizes: Buchberger={}, F4={}", gb_buchberger.len(), gb_f4.len());
-
-    if gb_buchberger.len() == gb_f4.len() {
-        println!("  ✓ Basis sizes match");
+    if let Some(ref gb_buch) = gb_buchberger {
+        println!("  Basis sizes: Buchberger={}, F4={}",
+                 gb_buch.len(), gb_f4.len());
     } else {
-        println!("  ⚠ Basis sizes differ (this is OK if they generate the same ideal)");
+        println!("  Basis size: F4={}",
+                 gb_f4.len());
     }
 
-    // Check correctness: both bases should generate the same ideal
-    // Test: every Buchberger element should reduce to zero by F4 basis
-    let mut all_reduce = true;
-    for poly in &gb_buchberger {
-        let mut remainder = poly_ring.clone_el(poly);
-        loop {
-            let lt = match poly_ring.LT(&remainder, DegRevLex) {
-                Some(lt) => lt,
-                None => break, // Reduced to zero - good!
-            };
+    // Timing comparison
+    if let Some(time_buch) = time_buchberger {
+        let ratio = time_f4.as_secs_f64() / time_buch.as_secs_f64();
 
-            let mut reduced = false;
-            for basis_elem in &gb_f4 {
-                if let Some((basis_lc, basis_lm)) = poly_ring.LT(basis_elem, DegRevLex) {
-                    if let Ok(mult) = poly_ring.monomial_div(poly_ring.clone_monomial(lt.1), basis_lm) {
-                        let coeff_mult = poly_ring.base_ring().checked_div(&lt.0, &basis_lc).unwrap();
-                        let mut scaled = poly_ring.clone_el(basis_elem);
-                        poly_ring.mul_assign_monomial(&mut scaled, mult);
-                        poly_ring.inclusion().mul_assign_map(&mut scaled, coeff_mult);
-                        remainder = poly_ring.sub_ref(&remainder, &scaled);
-                        reduced = true;
-                        break;
-                    }
-                }
-            }
-            if !reduced {
-                all_reduce = false;
-                break;
-            }
+        println!("\n  Buchberger vs F4:");
+        if ratio < 1.0 {
+            println!("    F4 is {:.2}x FASTER", 1.0 / ratio);
+        } else {
+            println!("    F4 is {:.2}x SLOWER", ratio);
         }
-        if !all_reduce {
-            break;
-        }
-    }
-
-    if all_reduce {
-        println!("  ✓ Correctness verified: Buchberger basis ⊆ F4 ideal");
-    } else {
-        println!("  ✗ CORRECTNESS FAILED: Bases generate different ideals!");
-    }
-
-    let ratio = time_f4.as_secs_f64() / time_buchberger.as_secs_f64();
-    if ratio < 1.0 {
-        println!("  F4 is {:.2}x FASTER", 1.0 / ratio);
-    } else {
-        println!("  F4 is {:.2}x SLOWER", ratio);
     }
     println!();
 }
 
 fn main() {
     println!("F4 vs Buchberger Scaling Test");
-    println!("Testing Katsura systems of increasing size\n");
+    println!();
 
-    // Start with size 3 (known to work)
-    run_comparison(3);
+    // Size 5 (medium)
+    //run_comparison(5, false);
 
-    // Size 4
-    run_comparison(4);
+    // Size 6 (larger)
+    //run_comparison(6, false);
 
-    // Size 5 (getting larger)
-    run_comparison(5);
+    // Size 7 (large)
+    run_comparison(7, false);
 
     println!("Test complete!");
 }

@@ -8,6 +8,108 @@
 use feanor_math::ring::*;
 use feanor_math::rings::multivariate::*;
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Thread-safe pivot rows using atomic operations
+///
+/// This structure wraps a Vec<AtomicUsize> to enable lock-free concurrent pivot marking.
+/// Encoding: 0 = None (no pivot), row_idx+1 = Some(row_idx)
+#[derive(Debug)]
+pub struct AtomicPivotRows {
+    /// Internal storage: 0 = None, row+1 = Some(row)
+    inner: Vec<AtomicUsize>,
+}
+
+impl AtomicPivotRows {
+    /// Create a new AtomicPivotRows with given size, all initialized to None
+    pub fn new(size: usize) -> Self {
+        AtomicPivotRows {
+            inner: (0..size).map(|_| AtomicUsize::new(0)).collect(),
+        }
+    }
+
+    /// Check if a column has a pivot
+    pub fn has_pivot(&self, col: usize) -> bool {
+        self.inner[col].load(Ordering::Acquire) != 0
+    }
+
+    /// Get the pivot row for a column (if it exists)
+    pub fn get_pivot_row(&self, col: usize) -> Option<usize> {
+        let val = self.inner[col].load(Ordering::Acquire);
+        if val == 0 {
+            None
+        } else {
+            Some(val - 1)
+        }
+    }
+
+    /// Try to mark a column as having a pivot at the given row
+    ///
+    /// Uses compare-and-swap to atomically mark the pivot.
+    /// Returns true if successful, false if another thread already marked it.
+    pub fn try_mark_pivot(&self, col: usize, row: usize) -> bool {
+        self.inner[col]
+            .compare_exchange(0, row + 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    /// Mark a pivot unconditionally (for single-threaded code)
+    pub fn mark_pivot(&self, col: usize, row: usize) {
+        self.inner[col].store(row + 1, Ordering::Release);
+    }
+
+    /// Get the number of columns
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// Check if empty
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// Extend with more columns (initialized to None)
+    pub fn extend(&mut self, count: usize) {
+        self.inner.extend((0..count).map(|_| AtomicUsize::new(0)));
+    }
+
+    /// Convert to Vec<Option<usize>> for compatibility with single-threaded code
+    pub fn to_vec(&self) -> Vec<Option<usize>> {
+        self.inner
+            .iter()
+            .map(|atomic| {
+                let val = atomic.load(Ordering::Acquire);
+                if val == 0 {
+                    None
+                } else {
+                    Some(val - 1)
+                }
+            })
+            .collect()
+    }
+
+    /// Create from Vec<Option<usize>> (for migration/testing)
+    pub fn from_vec(vec: Vec<Option<usize>>) -> Self {
+        AtomicPivotRows {
+            inner: vec
+                .into_iter()
+                .map(|opt| AtomicUsize::new(opt.map_or(0, |r| r + 1)))
+                .collect(),
+        }
+    }
+
+    /// Remap pivot rows according to a column mapping
+    pub fn remap(&self, old_to_new: &[usize]) -> Self {
+        let mut new_inner: Vec<AtomicUsize> = (0..self.len())
+            .map(|_| AtomicUsize::new(0))
+            .collect();
+        for (old_col, &new_col) in old_to_new.iter().enumerate() {
+            let val = self.inner[old_col].load(Ordering::Acquire);
+            new_inner[new_col].store(val, Ordering::Release);
+        }
+        AtomicPivotRows { inner: new_inner }
+    }
+}
 
 /// A sparse row in the Macaulay matrix
 ///
@@ -87,12 +189,15 @@ where
     /// Mapping from column index to monomial
     pub col_to_monomial: Vec<PolyMonomial<P>>,
 
+    /// Cached expanded exponents for each column (same indexing as `col_to_monomial`)
+    pub col_exponents: Vec<Vec<usize>>,
+
     /// Mapping from monomial to column index
     pub monomial_to_col: HashMap<Vec<usize>, usize>,
 
     /// Pivot columns (columns with known reducers)
     /// pivot_rows[col] = Some(row_index) if column `col` has a pivot in `row_index`
-    pub pivot_rows: Vec<Option<usize>>,
+    pub pivot_rows: AtomicPivotRows,
 
     /// Row types for AB/CD semantics (tracks which rows are rr vs tr)
     pub row_types: Vec<RowType>,
@@ -113,8 +218,9 @@ where
             ring,
             rows: Vec::new(),
             col_to_monomial: Vec::new(),
+            col_exponents: Vec::new(),
             monomial_to_col: HashMap::new(),
-            pivot_rows: Vec::new(),
+            pivot_rows: AtomicPivotRows::new(0),
             row_types: Vec::new(),
             ncl: None,
         }
@@ -130,9 +236,16 @@ where
 
         let col = self.col_to_monomial.len();
         self.col_to_monomial.push(self.ring.clone_monomial(monomial));
+        self.col_exponents.push(expanded.clone());
         self.monomial_to_col.insert(expanded, col);
-        self.pivot_rows.push(None);
+        self.pivot_rows.extend(1);
         col
+    }
+
+    /// Get cached expanded exponents for a column
+    #[inline]
+    pub fn col_exp(&self, col: usize) -> &Vec<usize> {
+        &self.col_exponents[col]
     }
 
     /// Convert a polynomial to a sparse row
@@ -196,18 +309,22 @@ where
     /// Mark a column as having a pivot in a given row
     pub fn mark_pivot(&mut self, col: usize, row: usize) {
         if col < self.pivot_rows.len() {
-            self.pivot_rows[col] = Some(row);
+            self.pivot_rows.mark_pivot(col, row);
         }
     }
 
     /// Check if a column has a pivot
     pub fn has_pivot(&self, col: usize) -> bool {
-        col < self.pivot_rows.len() && self.pivot_rows[col].is_some()
+        col < self.pivot_rows.len() && self.pivot_rows.has_pivot(col)
     }
 
     /// Get the row index of a pivot column
     pub fn get_pivot_row(&self, col: usize) -> Option<usize> {
-        self.pivot_rows.get(col).and_then(|&r| r)
+        if col < self.pivot_rows.len() {
+            self.pivot_rows.get_pivot_row(col)
+        } else {
+            None
+        }
     }
 
     /// Reorder columns using an SHT-like index: entries with idx==2 (pivots)
@@ -243,9 +360,7 @@ where
             let deg_a = self.ring.monomial_deg(mono_a);
             let deg_b = self.ring.monomial_deg(mono_b);
             deg_a.cmp(&deg_b).then_with(|| {
-                let exp_a = self.ring.expand_monomial(mono_a);
-                let exp_b = self.ring.expand_monomial(mono_b);
-                exp_a.cmp(&exp_b)
+                self.col_exponents[a].cmp(&self.col_exponents[b])
             })
         });
 
@@ -255,9 +370,7 @@ where
             let deg_a = self.ring.monomial_deg(mono_a);
             let deg_b = self.ring.monomial_deg(mono_b);
             deg_a.cmp(&deg_b).then_with(|| {
-                let exp_a = self.ring.expand_monomial(mono_a);
-                let exp_b = self.ring.expand_monomial(mono_b);
-                exp_a.cmp(&exp_b)
+                self.col_exponents[a].cmp(&self.col_exponents[b])
             })
         });
 
@@ -289,26 +402,24 @@ where
             row.entries.sort_unstable_by_key(|(col, _)| *col);
         }
 
-        // Reorder col_to_monomial and rebuild monomial_to_col
+        // Reorder col_to_monomial/col_exponents and rebuild monomial_to_col
         let mut new_cols: Vec<PolyMonomial<P>> = Vec::with_capacity(ncols);
+        let mut new_exps: Vec<Vec<usize>> = Vec::with_capacity(ncols);
         for &old_col in &new_order {
             new_cols.push(self.ring.clone_monomial(&self.col_to_monomial[old_col]));
+            new_exps.push(self.col_exponents[old_col].clone());
         }
         self.col_to_monomial = new_cols;
+        self.col_exponents = new_exps;
 
         self.monomial_to_col.clear();
         self.monomial_to_col.reserve(ncols);
-        for (new_col, m) in self.col_to_monomial.iter().enumerate() {
-            let em = self.ring.expand_monomial(m);
-            self.monomial_to_col.insert(em, new_col);
+        for (new_col, em) in self.col_exponents.iter().enumerate() {
+            self.monomial_to_col.insert(em.clone(), new_col);
         }
 
         // Remap pivot_rows
-        let mut new_pivot_rows = vec![None; ncols];
-        for (old_col, opt_row) in self.pivot_rows.iter().enumerate() {
-            new_pivot_rows[old_to_new[old_col]] = *opt_row;
-        }
-        self.pivot_rows = new_pivot_rows;
+        self.pivot_rows = self.pivot_rows.remap(&old_to_new);
     }
 
     /// Reorder columns so pivot monomials come first
@@ -367,19 +478,16 @@ where
             .map(|&old_col| self.ring.clone_monomial(&old_col_to_monomial[old_col]))
             .collect();
 
-        // Rebuild monomial_to_col
+        // Rebuild monomial_to_col using cached exponents; also keep col_exponents aligned
+        let old_exps = std::mem::take(&mut self.col_exponents);
+        self.col_exponents = new_order.iter().map(|&old_col| old_exps[old_col].clone()).collect();
         self.monomial_to_col.clear();
-        for (new_col, monomial) in self.col_to_monomial.iter().enumerate() {
-            let expanded = self.ring.expand_monomial(monomial);
-            self.monomial_to_col.insert(expanded, new_col);
+        for (new_col, em) in self.col_exponents.iter().enumerate() {
+            self.monomial_to_col.insert(em.clone(), new_col);
         }
 
         // Reorder pivot_rows
-        let old_pivot_rows = std::mem::take(&mut self.pivot_rows);
-        self.pivot_rows = new_order
-            .iter()
-            .map(|&old_col| old_pivot_rows[old_col])
-            .collect();
+        self.pivot_rows = self.pivot_rows.remap(&old_to_new);
     }
 
     /// Reorder columns so that the provided pivot monomials come first.
@@ -403,8 +511,8 @@ where
         let mut pivots: Vec<usize> = Vec::new();
         let mut tails: Vec<usize> = Vec::new();
         for col in 0..ncols {
-            let em = self.ring.expand_monomial(&self.col_to_monomial[col]);
-            if pivot_set.contains(&em) {
+            let em = &self.col_exponents[col];
+            if pivot_set.contains(em) {
                 pivots.push(col);
             } else {
                 tails.push(col);
@@ -437,27 +545,24 @@ where
             row.entries.sort_unstable_by_key(|(col, _)| *col);
         }
 
-        // Reorder col_to_monomial and rebuild monomial_to_col
+        // Reorder col_to_monomial/col_exponents and rebuild monomial_to_col
         let mut new_cols: Vec<PolyMonomial<P>> = Vec::with_capacity(ncols);
+        let mut new_exps: Vec<Vec<usize>> = Vec::with_capacity(ncols);
         for &old_col in &new_order {
             new_cols.push(self.ring.clone_monomial(&self.col_to_monomial[old_col]));
+            new_exps.push(self.col_exponents[old_col].clone());
         }
         self.col_to_monomial = new_cols;
+        self.col_exponents = new_exps;
 
         self.monomial_to_col.clear();
         self.monomial_to_col.reserve(ncols);
-        for (new_col, m) in self.col_to_monomial.iter().enumerate() {
-            let em = self.ring.expand_monomial(m);
-            self.monomial_to_col.insert(em, new_col);
+        for (new_col, em) in self.col_exponents.iter().enumerate() {
+            self.monomial_to_col.insert(em.clone(), new_col);
         }
 
         // Remap pivot_rows to the new order
-        let mut new_pivot_rows = vec![None; ncols];
-        for (old_col, opt_row) in self.pivot_rows.iter().enumerate() {
-            let new_col = old_to_new[old_col];
-            new_pivot_rows[new_col] = *opt_row;
-        }
-        self.pivot_rows = new_pivot_rows;
+        self.pivot_rows = self.pivot_rows.remap(&old_to_new);
     }
 
     /// Reorder columns so that the provided pivot column indices come first.
@@ -507,26 +612,24 @@ where
             row.sort();
         }
 
-        // Reorder col_to_monomial and rebuild monomial_to_col
+        // Reorder col_to_monomial/col_exponents and rebuild monomial_to_col
         let mut new_cols: Vec<PolyMonomial<P>> = Vec::with_capacity(ncols);
+        let mut new_exps: Vec<Vec<usize>> = Vec::with_capacity(ncols);
         for &old_col in &new_order {
             new_cols.push(self.ring.clone_monomial(&self.col_to_monomial[old_col]));
+            new_exps.push(self.col_exponents[old_col].clone());
         }
         self.col_to_monomial = new_cols;
+        self.col_exponents = new_exps;
 
         self.monomial_to_col.clear();
         self.monomial_to_col.reserve(ncols);
-        for (new_col, m) in self.col_to_monomial.iter().enumerate() {
-            let em = self.ring.expand_monomial(m);
-            self.monomial_to_col.insert(em, new_col);
+        for (new_col, em) in self.col_exponents.iter().enumerate() {
+            self.monomial_to_col.insert(em.clone(), new_col);
         }
 
         // Remap pivot_rows
-        let mut new_pivot_rows = vec![None; ncols];
-        for (old_col, opt_row) in self.pivot_rows.iter().enumerate() {
-            new_pivot_rows[old_to_new[old_col]] = *opt_row;
-        }
-        self.pivot_rows = new_pivot_rows;
+        self.pivot_rows = self.pivot_rows.remap(&old_to_new);
     }
 
     /// Sort rows in the given range by pivot column (ascending) then density (ascending).

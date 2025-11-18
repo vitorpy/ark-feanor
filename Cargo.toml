@@ -24,6 +24,7 @@ feanor-math = { path = "vendor/feanor-math", features = ["unstable-enable"] }
 num-bigint = "0.4"
 num-traits = "0.2"
 lazy_static = "1.4"
+rayon = "1.8"
 
 [dev-dependencies]
 criterion = "0.5"
@@ -78,6 +79,7 @@ harness = false
 opt-level = 3
 lto = true
 codegen-units = 1
+debug = true
 
 [patch.crates-io]
 feanor-math = { path = "vendor/feanor-math" }

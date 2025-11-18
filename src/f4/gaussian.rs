@@ -4,62 +4,11 @@
 //! Optimized for cryptographically large prime fields (BN254, BLS12-381) where field
 //! operations are expensive.
 
-use super::matrix::{MacaulayMatrix, RowType, SparseRow};
+use super::matrix::{MacaulayMatrix, SparseRow};
 use feanor_math::divisibility::DivisibilityRingStore;
 use feanor_math::field::Field;
 use feanor_math::ring::*;
 use feanor_math::rings::multivariate::*;
-
-/// Reduce the Macaulay matrix to row echelon form
-///
-/// This performs Gaussian elimination on the matrix, reducing all rows.
-/// The matrix is modified in place.
-///
-/// Returns the indices of rows with new pivots (i.e., non-zero rows after reduction)
-pub fn reduce_matrix<P>(matrix: &mut MacaulayMatrix<P>) -> Vec<usize>
-where
-    P: RingStore + Copy,
-    P::Type: MultivariatePolyRing,
-    <<P::Type as RingExtension>::BaseRing as RingStore>::Type: Field,
-{
-    let num_rows = matrix.num_rows();
-    let mut new_pivot_rows = Vec::new();
-
-    // Process each row
-    for row_idx in 0..num_rows {
-        // Reduce the current row by all known pivots
-        reduce_row_by_pivots(matrix, row_idx);
-
-        // Check if the row has a new pivot
-        if let Some(pivot_col) = matrix.rows[row_idx].pivot() {
-            // Normalize the row so the pivot coefficient is 1
-            normalize_row(&matrix.ring, &mut matrix.rows[row_idx], pivot_col);
-
-            // If this column doesn't have a pivot yet, mark it
-            if !matrix.has_pivot(pivot_col) {
-                matrix.mark_pivot(pivot_col, row_idx);
-                new_pivot_rows.push(row_idx);
-            }
-        }
-    }
-
-    new_pivot_rows
-}
-
-/// Reduce a set of rows by the currently known pivot rows only.
-///
-/// Unlike `reduce_matrix`, this does not mark new pivot rows. It only
-/// performs reductions against existing entries in `matrix.pivot_rows`.
-pub fn reduce_by_existing_pivots<P>(matrix: &mut MacaulayMatrix<P>, row_range: std::ops::Range<usize>)
-where
-    P: RingStore + Copy,
-    P::Type: MultivariatePolyRing,
-    <<P::Type as RingExtension>::BaseRing as RingStore>::Type: Field,
-{
-    for row_idx in row_range {
-        reduce_row_by_pivots(matrix, row_idx);
-    }
-}
 
 /// AB phase reduction: reduce tr rows by rr rows using A-block columns only (columns < ncl)
 ///
@@ -89,12 +38,20 @@ where
 
     // Step 1: Build rr_map: A-column -> rr_row_idx
     // Map each A-block column to the rr row whose leftmost entry is that column
+    // Also cache the inverse of each rr row's leading coefficient for fast multiplier computation
     let mut rr_map: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    let mut rr_inv_cache: std::collections::HashMap<usize, PolyCoeff<P>> = std::collections::HashMap::new();
+
     for rr_idx in rr_range {
         if let Some(pivot_col) = matrix.rows[rr_idx].pivot() {
             if pivot_col < ncl {
                 // Only map A-block columns
                 rr_map.insert(pivot_col, rr_idx);
+
+                // Cache the inverse of the leading coefficient
+                let rr_leading_coeff = &matrix.rows[rr_idx].entries[0].1;
+                let rr_inv = base_ring.invert(rr_leading_coeff).unwrap();
+                rr_inv_cache.insert(rr_idx, rr_inv);
             }
         }
     }
@@ -137,10 +94,11 @@ where
                 break;
             }
 
-            // Compute multiplier: (tr_row leading coeff) / (rr_row leading coeff)
+            // Compute multiplier: (tr_row leading coeff) * (cached inverse of rr_row leading coeff)
+            // This is much faster than division as we pre-computed the inverse
             let tr_leading_coeff = base_ring.clone_el(&matrix.rows[tr_idx].entries[0].1);
-            let rr_leading_coeff = base_ring.clone_el(&matrix.rows[rr_idx].entries[0].1);
-            let multiplier = base_ring.checked_div(&tr_leading_coeff, &rr_leading_coeff).unwrap();
+            let rr_inv = rr_inv_cache.get(&rr_idx).unwrap();
+            let multiplier = base_ring.mul_ref(&tr_leading_coeff, rr_inv);
 
             // Temporarily take out the tr row to allow immutable access to rr row
             let mut tr_row = std::mem::replace(&mut matrix.rows[tr_idx], SparseRow::new());
@@ -162,24 +120,12 @@ where
     }
 }
 
-/// CD phase elimination: reduce tr rows and discover pivots only in columns >= ncl (B/D blocks)
+/// CD phase reduction: reduce tr rows and discover pivots only in columns >= ncl (B/D blocks)
 ///
-/// This implements the CD phase of msolve's sparse linear algebra:
-/// - Operates only on tr rows (ignores rr rows for pivot discovery)
-/// - Discovers pivots only in columns >= ncl (B/D blocks)
-/// - Uses existing pivots (from rr rows in A-block) for reduction
-/// - Returns indices of tr rows with new pivots and counts for diagnostics
+/// This is a simple one-pass CD phase that reduces tr rows by existing pivots
+/// and discovers new pivots in the B/D blocks (columns >= ncl).
 ///
-/// # Arguments
-/// * `matrix` - The Macaulay matrix
-/// * `tr_range` - Range of tr row indices (to-reduce rows)
-/// * `ncl` - A-block width (skip pivot discovery for columns < ncl)
-///
-/// # Returns
-/// Tuple of (pivot_rows, tr_new_pivots_count, anomaly_a_pivots_count)
-/// - pivot_rows: Vector of tr row indices that have new pivots in B/D blocks
-/// - tr_new_pivots_count: Count of new pivots discovered in tr rows (should equal pivot_rows.len())
-/// - anomaly_a_pivots_count: Count of tr rows that still have pivot < ncl (should be 0)
+/// Returns: (new_pivot_rows, tr_new_pivots_count, anomaly_a_pivots)
 pub fn reduce_matrix_tr<P>(
     matrix: &mut MacaulayMatrix<P>,
     tr_range: std::ops::Range<usize>,
@@ -193,10 +139,13 @@ where
     let mut new_pivot_rows = Vec::new();
     let mut anomaly_a_pivots = 0;
 
+    // Cache for pivot row leading coefficient inverses (speeds up multiplier computation)
+    let mut pivot_inv_cache: std::collections::HashMap<usize, PolyCoeff<P>> = std::collections::HashMap::new();
+
     // Process each tr row
     for row_idx in tr_range {
         // Reduce the current row by all known pivots (including rr pivots in A-block)
-        reduce_row_by_pivots(matrix, row_idx);
+        reduce_row_by_pivots(matrix, row_idx, &mut pivot_inv_cache);
 
         // Check if the row has a pivot after reduction
         if let Some(pivot_col) = matrix.rows[row_idx].pivot() {
@@ -222,8 +171,30 @@ where
     (new_pivot_rows, tr_new_pivots_count, anomaly_a_pivots)
 }
 
+/// CD phase elimination: reduce tr rows and discover pivots only in columns >= ncl (B/D blocks)
+///
+/// This implements the CD phase of msolve's sparse linear algebra:
+/// - Operates only on tr rows (ignores rr rows for pivot discovery)
+/// - Discovers pivots only in columns >= ncl (B/D blocks)
+/// - Uses existing pivots (from rr rows in A-block) for reduction
+/// - Returns indices of tr rows with new pivots and counts for diagnostics
+///
+/// # Arguments
+/// * `matrix` - The Macaulay matrix
+/// * `tr_range` - Range of tr row indices (to-reduce rows)
+/// * `ncl` - A-block width (skip pivot discovery for columns < ncl)
+///
+/// # Returns
+/// Tuple of (pivot_rows, tr_new_pivots_count, anomaly_a_pivots_count)
+/// - pivot_rows: Vector of tr row indices that have new pivots in B/D blocks
+/// - tr_new_pivots_count: Count of new pivots discovered in tr rows (should equal pivot_rows.len())
+/// - anomaly_a_pivots_count: Count of tr rows that still have pivot < ncl (should be 0)
 /// Reduce a single row by all known pivot rows
-fn reduce_row_by_pivots<P>(matrix: &mut MacaulayMatrix<P>, row_idx: usize)
+fn reduce_row_by_pivots<P>(
+    matrix: &mut MacaulayMatrix<P>,
+    row_idx: usize,
+    pivot_inv_cache: &mut std::collections::HashMap<usize, PolyCoeff<P>>,
+)
 where
     P: RingStore + Copy,
     P::Type: MultivariatePolyRing,
@@ -243,11 +214,13 @@ where
             _ => break, // No reducer available or we'd be reducing by ourselves
         };
 
-        // Compute multiplier before taking the row out
-        // This avoids cloning the pivot row entirely
+        // Compute multiplier using cached inverse or compute and cache it
         let row_leading_coeff = base_ring.clone_el(&matrix.rows[row_idx].entries[0].1);
-        let pivot_leading_coeff = base_ring.clone_el(&matrix.rows[pivot_row_idx].entries[0].1);
-        let multiplier = base_ring.checked_div(&row_leading_coeff, &pivot_leading_coeff).unwrap();
+        let pivot_inv = pivot_inv_cache.entry(pivot_row_idx).or_insert_with(|| {
+            let pivot_leading_coeff = &matrix.rows[pivot_row_idx].entries[0].1;
+            base_ring.invert(pivot_leading_coeff).unwrap()
+        });
+        let multiplier = base_ring.mul_ref(&row_leading_coeff, pivot_inv);
 
         // Temporarily replace the target row with empty to allow immutable access to pivot row
         let mut row = std::mem::replace(&mut matrix.rows[row_idx], SparseRow::new());
@@ -400,39 +373,5 @@ mod tests {
         assert_eq!(target.entries[0], (2, base.int_hom().map(3)));
         assert_eq!(target.entries[1], (3, base.int_hom().map(7))); // -10 mod 17 = 7
         assert_eq!(target.entries[2], (5, base.int_hom().map(2)));
-    }
-
-    #[test]
-    fn test_matrix_reduction() {
-        let base = zn_static::F17;
-        let ring = MultivariatePolyRingImpl::new(base, 2);
-
-        let mut matrix = MacaulayMatrix::new(&ring);
-
-        // Create two polynomials
-        // p1: x + 2y
-        let p1 = ring.from_terms([
-            (base.int_hom().map(1), ring.create_monomial([1, 0])),
-            (base.int_hom().map(2), ring.create_monomial([0, 1])),
-        ].into_iter());
-
-        // p2: 3x + 6y (which is 3*p1)
-        let p2 = ring.from_terms([
-            (base.int_hom().map(3), ring.create_monomial([1, 0])),
-            (base.int_hom().map(6), ring.create_monomial([0, 1])),
-        ].into_iter());
-
-        let row1 = matrix.polynomial_to_row(&p1, DegRevLex);
-        let row2 = matrix.polynomial_to_row(&p2, DegRevLex);
-
-        matrix.add_row(row1, RowType::Tr);  // Test row type
-        matrix.add_row(row2, RowType::Tr);  // Test row type
-
-        // Reduce the matrix
-        let new_pivots = reduce_matrix(&mut matrix);
-
-        // Should have one pivot (row 0), row 1 should reduce to zero
-        assert_eq!(new_pivots.len(), 1);
-        assert!(matrix.rows[1].is_zero());
     }
 }
