@@ -123,14 +123,28 @@ fn main() {
     println!("[2/5] Creating polynomial ring...");
     let start = Instant::now();
     let field = &*BN254_FR;
+
+    // For GB computation, we need higher degree limits than the input system
+    // R1CS constraints are degree 2, but GB can produce higher degree intermediates
+    // Use heuristic based on system size (similar to f4_scaling_test.rs)
+    let n_vars = system.ring_config.n_vars;
+    let max_degree = if n_vars < 50 {
+        50  // Small systems
+    } else if n_vars < 500 {
+        500 // Medium systems
+    } else {
+        1200 // Large systems (AMM is 1142 vars)
+    };
+
     let poly_ring = MultivariatePolyRingImpl::new_with_mult_table(
         field,
-        system.ring_config.n_vars,
-        system.ring_config.max_degree as u16,
+        n_vars,
+        max_degree as u16,
         (system.ring_config.mult_table.0 as u16, system.ring_config.mult_table.1 as u16),
         Global,
     );
     println!("  Created in {:?}", start.elapsed());
+    println!("  Configured max_degree: {} (for {} vars)", max_degree, n_vars);
     println!();
 
     // Step 3: Build polynomial system from R1CS matrices
