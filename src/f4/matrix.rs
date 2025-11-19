@@ -701,7 +701,7 @@ mod tests {
     use feanor_math::homomorphism::Homomorphism;
     use feanor_math::rings::multivariate::multivariate_impl::MultivariatePolyRingImpl;
     use feanor_math::rings::multivariate::DegRevLex;
-    use feanor_math::rings::zn::zn_static;
+    use crate::BN254_FR;
 
     #[test]
     fn test_sparse_row_basic() {
@@ -719,7 +719,7 @@ mod tests {
 
     #[test]
     fn test_polynomial_to_row() {
-        let base = zn_static::F17;
+        let base = &*BN254_FR;
         let ring = MultivariatePolyRingImpl::new(base, 3);
 
         let mut matrix = MacaulayMatrix::new(&ring);
@@ -744,7 +744,7 @@ mod tests {
 
     #[test]
     fn test_column_management() {
-        let base = zn_static::F17;
+        let base = &*BN254_FR;
         let ring = MultivariatePolyRingImpl::new(base, 2);
 
         let mut matrix = MacaulayMatrix::new(&ring);

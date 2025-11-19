@@ -1,15 +1,14 @@
-//! F4 vs Buchberger scaling comparison
-//! Tests on progressively larger systems
+//! F4 scaling test
+//! Tests F4 performance on progressively larger systems
 
 #![feature(allocator_api)]
 
 use ark_feanor::*;
 use ark_feanor::f4::f4_simple;
 use ark_bn254::Fr as BnFr;
-use feanor_math::algorithms::buchberger::buchberger_simple;
 use feanor_math::homomorphism::Homomorphism;
 use feanor_math::rings::multivariate::{DegRevLex};
-use feanor_math::rings::multivariate::multivariate_impl::{DegreeCfg, MultivariatePolyRingImpl};
+use feanor_math::rings::multivariate::multivariate_impl::MultivariatePolyRingImpl;
 use feanor_math::ring::RingStore;
 use std::alloc::Global;
 use std::time::Instant;
@@ -63,46 +62,12 @@ fn create_katsura_system(poly_ring: &BN254PolyRing, n: usize) -> Vec<El<BN254Pol
     system
 }
 
-fn run_comparison(n: usize, skip_buchberger: bool) {
+fn run_test(n: usize) {
     let field = &*BN254_FR;
 
-    // Adjust degree limits based on problem size
-    let max_deg = match n {
-        3 => 50,
-        4 => 100,
-        5 => 200,
-        6 => 500,
-        7 => 800,
-        _ => 1200,
-    };
-
-    let degree_cfg = DegreeCfg::new(max_deg).with_precompute(50);
-    let poly_ring = MultivariatePolyRingImpl::new_with_mult_table_ex(
-        field, n, degree_cfg, (0, 0), Global
-    );
+    let poly_ring = MultivariatePolyRingImpl::new(field, n);
 
     println!("==== Katsura-{} ====", n);
-
-    // Run Buchberger (unless skipped for large problems)
-    let (gb_buchberger, time_buchberger) = if !skip_buchberger {
-        println!("Running Buchberger...");
-        let system_buch = create_katsura_system(&poly_ring, n);
-        let start = Instant::now();
-        let gb = buchberger_simple::<_, DegRevLex>(
-            &poly_ring,
-            system_buch,
-            DegRevLex
-        );
-        let time = start.elapsed();
-
-        println!("  Time: {:?}", time);
-        println!("  Basis size: {}", gb.len());
-        println!();
-        (Some(gb), Some(time))
-    } else {
-        println!("Skipping Buchberger (too slow for this size)...\n");
-        (None, None)
-    };
 
     // Run F4
     println!("Running F4...");
@@ -118,43 +83,17 @@ fn run_comparison(n: usize, skip_buchberger: bool) {
     println!("  Time: {:?}", time_f4);
     println!("  Basis size: {}", gb_f4.len());
     println!();
-
-    // Compare
-    println!("Results:");
-    if let Some(ref gb_buch) = gb_buchberger {
-        println!("  Basis sizes: Buchberger={}, F4={}",
-                 gb_buch.len(), gb_f4.len());
-    } else {
-        println!("  Basis size: F4={}",
-                 gb_f4.len());
-    }
-
-    // Timing comparison
-    if let Some(time_buch) = time_buchberger {
-        let ratio = time_f4.as_secs_f64() / time_buch.as_secs_f64();
-
-        println!("\n  Buchberger vs F4:");
-        if ratio < 1.0 {
-            println!("    F4 is {:.2}x FASTER", 1.0 / ratio);
-        } else {
-            println!("    F4 is {:.2}x SLOWER", ratio);
-        }
-    }
-    println!();
 }
 
 fn main() {
-    println!("F4 vs Buchberger Scaling Test");
+    println!("F4 Scaling Test");
     println!();
 
-    // Size 5 (medium)
-    //run_comparison(5, false);
-
-    // Size 6 (larger)
-    //run_comparison(6, false);
-
-    // Size 7 (large)
-    run_comparison(9, false);
+    // Test on progressively larger systems
+    run_test(5);  // medium
+    run_test(6);  // larger
+    run_test(7);  // large
+    run_test(9);  // very large
 
     println!("Test complete!");
 }

@@ -53,32 +53,11 @@
 //! });
 //! ```
 //! 
-//! ## Gröbner Basis Computation
+//! ## Gröbner Basis Computation with F4
 //!
-//! ark-feanor provides two algorithms for computing Gröbner bases:
-//!
-//! ### Buchberger (F4-style)
-//!
-//! The default choice - reduces multiple S-polynomials in parallel before adding to basis.
-//! Good for sparse systems and lower memory usage.
-//!
-//! ```ignore
-//! use ark_feanor::*;
-//!
-//! let field = &*BN254_FR;
-//! let poly_ring = MultivariatePolyRingImpl::new(field, 2);
-//!
-//! // Define your polynomial system
-//! let system = vec![/* your polynomials */];
-//!
-//! // Compute Gröbner basis with Buchberger
-//! let gb = buchberger_simple(&poly_ring, system, DegRevLex);
-//! ```
-//!
-//! ### True F4 Algorithm
-//!
-//! Processes S-polynomials in batches via matrix reduction. Best for dense systems
-//! over cryptographic fields where many S-polynomials are generated per degree.
+//! ark-feanor implements the F4 algorithm for computing Gröbner bases.
+//! F4 processes S-polynomials in batches via matrix reduction, making it efficient
+//! for dense systems over cryptographic fields.
 //!
 //! ```ignore
 //! use ark_feanor::*;
@@ -93,48 +72,29 @@
 //! let gb = f4_simple(&poly_ring, system, DegRevLex);
 //! ```
 //!
-//! ### With Degree Limiting (Recommended for Large Systems)
+//! ### With Configuration Options
 //!
 //! ```ignore
 //! use ark_feanor::*;
+//! use ark_feanor::f4::*;
 //!
 //! let field = &*BN254_FR;
-//! let poly_ring = MultivariatePolyRingImpl::new(field, 64);
+//! let poly_ring = MultivariatePolyRingImpl::new(field, 2);
 //!
 //! // Configure with degree limit to avoid explosion
-//! let config = BuchbergerConfig::new()
+//! let config = F4Config::new()
 //!     .with_max_degree(10);  // Abort if degrees exceed 10
 //!
 //! let system = vec![/* your polynomials */];
 //!
 //! // Compute with configuration
-//! match buchberger_configured(&poly_ring, system, Lex, config) {
+//! match f4_configured(&poly_ring, system, DegRevLex, config) {
 //!     Ok(gb) => println!("Computed GB with {} elements", gb.len()),
 //!     Err(GBAborted::DegreeExceeded { max_degree, actual_degree }) => {
 //!         println!("Aborted: degree {} exceeded limit {}", actual_degree, max_degree);
 //!     }
-//!     Err(e) => println!("Error: {}", e),
+//!     Err(e) => println!("Error: {:?}", e),
 //! }
-//! ```
-//!
-//! ### Variable Elimination with BlockLex
-//!
-//! ```ignore
-//! use ark_feanor::*;
-//!
-//! let field = &*BN254_FR;
-//! let poly_ring = MultivariatePolyRingImpl::new(field, 65);
-//!
-//! // Eliminate first 64 variables, keep last variable
-//! let order = BlockLex::new(64);
-//! let config = BuchbergerConfig::new().with_max_degree(5);
-//!
-//! let system = vec![/* your polynomials */];
-//!
-//! // Compute elimination GB
-//! let gb = buchberger_configured(&poly_ring, system, order, config)?;
-//!
-//! // Polynomials involving only variable 64 form the elimination ideal
 //! ```
 //! 
 //! ## Type Aliases
@@ -196,21 +156,16 @@ pub use feanor_math::{
             MultivariatePolyRingStore,
             DegRevLex,
             Lex,
-            BlockLex,
         },
         poly::{
             PolyRingStore,
             dense_poly::DensePolyRing,
         },
     },
-    algorithms::buchberger::{
-        buchberger_simple,
-        buchberger_configured,
-        buchberger_with_sugar,
-        BuchbergerConfig,
-        GBAborted,
-    },
 };
+
+// Re-export F4 types
+pub use f4::GBAborted;
 
 /// Version information
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

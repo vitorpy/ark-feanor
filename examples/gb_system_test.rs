@@ -1,18 +1,17 @@
 #![feature(allocator_api)]
 
-//! Standalone GB test using serialized polynomial systems
+//! Standalone F4 test using serialized polynomial systems
 //!
-//! This tool tests Gröbner basis algorithms (Buchberger vs F4) on real zyga systems
+//! This tool tests the F4 Gröbner basis algorithm on real zyga systems
 //! without needing to compile circuits or run full setup.
 //!
 //! Usage:
-//!   cargo run --release --features elimination --bin gb_system_test -- <system.json>
+//!   cargo run --release --example gb_system_test -- <system.json>
 //!
 //! Example:
-//!   cargo run --release --features elimination --bin gb_system_test -- uint4_system.json
+//!   cargo run --release --example gb_system_test -- uint4_system.json
 //!
 //! Options:
-//!   --skip-buchberger    Skip Buchberger (for large systems)
 //!   --order <Lex|DegRevLex>  Change monomial ordering (default: Lex)
 
 use std::env;
@@ -73,16 +72,15 @@ fn main() {
     let args: Vec<String> = env::args().collect();
 
     if args.contains(&"--help".to_string()) || args.contains(&"-h".to_string()) {
-        println!("Usage: {} [system.json] [--skip-buchberger] [--order <Lex|DegRevLex>]", args[0]);
+        println!("Usage: {} [system.json] [--order <Lex|DegRevLex>]", args[0]);
         println!("\nArguments:");
         println!("  system.json          Path to serialized system (default: examples/uint4_system.json)");
         println!("                       Use examples/amm_system.json for large AMM system");
         println!("\nOptions:");
-        println!("  --skip-buchberger    Skip Buchberger test (for large systems)");
         println!("  --order <Lex|DegRevLex>  Monomial ordering (default: Lex)");
         println!("\nExamples:");
         println!("  {}                   # Use default uint4 system", args[0]);
-        println!("  {} examples/amm_system.json --skip-buchberger", args[0]);
+        println!("  {} examples/amm_system.json", args[0]);
         println!("  {} examples/uint4_system.json --order DegRevLex", args[0]);
         std::process::exit(0);
     }
@@ -94,20 +92,18 @@ fn main() {
         .map(|s| s.as_str())
         .unwrap_or("examples/uint4_system.json");
 
-    let skip_buchberger = args.contains(&"--skip-buchberger".to_string());
     let use_degrevlex = args.iter().any(|a| a == "--order")
         && args.iter().position(|a| a == "--order")
             .and_then(|i| args.get(i + 1))
             .map(|s| s == "DegRevLex")
             .unwrap_or(false);
 
-    println!("=== GB System Test ===\n");
+    println!("=== F4 System Test ===\n");
     println!("System file: {}", system_path);
-    println!("Skip Buchberger: {}", skip_buchberger);
     println!("Monomial order: {}\n", if use_degrevlex { "DegRevLex" } else { "Lex" });
 
     // Step 1: Load serialized system
-    println!("[1/5] Loading serialized system...");
+    println!("[1/4] Loading serialized system...");
     let start = Instant::now();
     let json = fs::read_to_string(system_path)
         .expect("Failed to read system file");
@@ -120,35 +116,18 @@ fn main() {
     println!();
 
     // Step 2: Create polynomial ring
-    println!("[2/5] Creating polynomial ring...");
+    println!("[2/4] Creating polynomial ring...");
     let start = Instant::now();
     let field = &*BN254_FR;
 
-    // For GB computation, we need higher degree limits than the input system
-    // R1CS constraints are degree 2, but GB can produce higher degree intermediates
-    // Use heuristic based on system size (similar to f4_scaling_test.rs)
     let n_vars = system.ring_config.n_vars;
-    let max_degree = if n_vars < 50 {
-        50  // Small systems
-    } else if n_vars < 500 {
-        500 // Medium systems
-    } else {
-        1200 // Large systems (AMM is 1142 vars)
-    };
 
-    let poly_ring = MultivariatePolyRingImpl::new_with_mult_table(
-        field,
-        n_vars,
-        max_degree as u16,
-        (system.ring_config.mult_table.0 as u16, system.ring_config.mult_table.1 as u16),
-        Global,
-    );
+    let poly_ring = MultivariatePolyRingImpl::new(field, n_vars);
     println!("  Created in {:?}", start.elapsed());
-    println!("  Configured max_degree: {} (for {} vars)", max_degree, n_vars);
     println!();
 
     // Step 3: Build polynomial system from R1CS matrices
-    println!("[3/5] Building polynomial system from R1CS...");
+    println!("[3/4] Building polynomial system from R1CS...");
     let start = Instant::now();
 
     // Helper to build linear polynomial from coefficient vector
@@ -186,42 +165,8 @@ fn main() {
     println!("  Built {} polynomials in {:?}", poly_system.len(), start.elapsed());
     println!();
 
-    // Step 4: Run Buchberger (if not skipped)
-    let buchberger_time = if !skip_buchberger {
-        println!("[4/5] Running Buchberger algorithm...");
-
-        // Need to rebuild system since polynomials don't implement Clone
-        let mut poly_system_buch = Vec::with_capacity(system.system.n_constraints);
-        for i in 0..system.system.n_constraints {
-            let a_lin = build_linear(&system.system.a_matrix[i]);
-            let b_lin = build_linear(&system.system.b_matrix[i]);
-            let c_lin = build_linear(&system.system.c_matrix[i]);
-            let ab = poly_ring.mul(a_lin, b_lin);
-            let neg_c = poly_ring.negate(c_lin);
-            let f = poly_ring.add(ab, neg_c);
-            poly_system_buch.push(f);
-        }
-
-        let start = Instant::now();
-        let buchberger_result = if use_degrevlex {
-            buchberger_simple(&poly_ring, poly_system_buch, DegRevLex)
-        } else {
-            buchberger_simple(&poly_ring, poly_system_buch, Lex)
-        };
-        let elapsed = start.elapsed();
-
-        println!("  Completed in {:?}", elapsed);
-        println!("  Basis size: {} polynomials", buchberger_result.len());
-        println!();
-        Some(elapsed)
-    } else {
-        println!("[4/5] Buchberger skipped");
-        println!();
-        None
-    };
-
-    // Step 5: Run F4 algorithm
-    println!("[5/5] Running F4 algorithm...");
+    // Step 4: Run F4 algorithm
+    println!("[4/4] Running F4 algorithm...");
     let start = Instant::now();
 
     let f4_result = if use_degrevlex {
@@ -238,13 +183,6 @@ fn main() {
     // Summary
     println!("=== Summary ===");
     println!("System: {} vars, {} constraints", system.ring_config.n_vars, system.system.n_constraints);
-    if let Some(buch_time) = buchberger_time {
-        println!("Buchberger: {:?}", buch_time);
-        println!("F4:         {:?}", f4_time);
-        let speedup = buch_time.as_secs_f64() / f4_time.as_secs_f64();
-        println!("Speedup:    {:.2}x", speedup);
-    } else {
-        println!("F4:         {:?}", f4_time);
-    }
+    println!("F4:         {:?}", f4_time);
     println!("\n=== Test Complete ===");
 }

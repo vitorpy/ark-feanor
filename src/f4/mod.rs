@@ -17,16 +17,11 @@
 //!
 //! ## When to Use F4
 //!
-//! **Use F4 when:**
+//! **Best for:**
 //! - Working with cryptographic fields (BN254, BLS12-381)
-//! - System generates many S-polynomials per degree
+//! - Systems that generate many S-polynomials per degree
 //! - Dense polynomial systems
-//! - You have sufficient memory for large matrices
-//!
-//! **Use Buchberger when:**
-//! - Sparse systems
-//! - Memory-constrained environments
-//! - Systems with rapid degree growth
+//! - Environments with sufficient memory for large matrices
 //!
 //! ## Example
 //!
@@ -52,7 +47,6 @@ pub mod monosig;
 use crate::f4::gaussian::{reduce_tr_by_rr_on_A, reduce_matrix_tr};
 use crate::f4::matrix::{MacaulayMatrix, RowType, SparseRow};
 use crate::f4::monosig::MonSig;
-use feanor_math::algorithms::buchberger::GBAborted;
 use feanor_math::divisibility::DivisibilityRingStore;
 use feanor_math::field::Field;
 use feanor_math::homomorphism::Homomorphism;
@@ -60,6 +54,40 @@ use feanor_math::ring::*;
 use feanor_math::rings::multivariate::*;
 use std::time::{Duration, Instant};
 use std::collections::{HashMap, HashSet};
+
+/// Error type for Gröbner basis computation that was aborted due to resource limits
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GBAborted {
+    /// The algorithm exceeded the maximum allowed polynomial degree
+    DegreeExceeded { max_degree: usize, actual_degree: usize },
+    /// The algorithm exceeded the maximum allowed number of S-polynomial reductions
+    SPairBudget { max_s_pairs: usize },
+    /// The algorithm exceeded the maximum allowed computation time
+    TimeBudget { max_seconds: u64 },
+    /// The algorithm exceeded the maximum allowed memory usage
+    MemBudget { max_bytes: usize },
+}
+
+impl std::fmt::Display for GBAborted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GBAborted::DegreeExceeded { max_degree, actual_degree } => {
+                write!(f, "Gröbner basis computation aborted: degree {} exceeded limit {}", actual_degree, max_degree)
+            }
+            GBAborted::SPairBudget { max_s_pairs } => {
+                write!(f, "Gröbner basis computation aborted: exceeded S-pair budget of {}", max_s_pairs)
+            }
+            GBAborted::TimeBudget { max_seconds } => {
+                write!(f, "Gröbner basis computation aborted: exceeded time budget of {} seconds", max_seconds)
+            }
+            GBAborted::MemBudget { max_bytes } => {
+                write!(f, "Gröbner basis computation aborted: exceeded memory budget of {} bytes", max_bytes)
+            }
+        }
+    }
+}
+
+impl std::error::Error for GBAborted {}
 
 /// Configuration for F4 algorithm
 #[derive(Clone, Debug)]

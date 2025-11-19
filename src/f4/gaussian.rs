@@ -335,11 +335,11 @@ mod tests {
     use feanor_math::homomorphism::Homomorphism;
     use feanor_math::rings::multivariate::multivariate_impl::MultivariatePolyRingImpl;
     use feanor_math::rings::multivariate::DegRevLex;
-    use feanor_math::rings::zn::zn_static;
+    use crate::BN254_FR;
 
     #[test]
     fn test_subtract_scaled_row() {
-        let base = zn_static::F17;
+        let base = &*BN254_FR;
 
         // target = [(0, 5), (2, 3), (5, 7)]
         let mut target = SparseRow {
@@ -366,12 +366,14 @@ mod tests {
 
         // Expected: column 0 cancels (5 - 5*1 = 0)
         //           column 2 stays: 3
-        //           column 3 appears: -5*2 = -10 = 7 (mod 17)
+        //           column 3 appears: -5*2 = -10 (in the field)
         //           column 5: 7 - 5*1 = 2
 
         assert_eq!(target.entries.len(), 3);
         assert_eq!(target.entries[0], (2, base.int_hom().map(3)));
-        assert_eq!(target.entries[1], (3, base.int_hom().map(7))); // -10 mod 17 = 7
+        // -10 in the field
+        let neg_10 = base.int_hom().map(-10);
+        assert_eq!(target.entries[1], (3, neg_10));
         assert_eq!(target.entries[2], (5, base.int_hom().map(2)));
     }
 }

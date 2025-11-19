@@ -1,6 +1,6 @@
 [package]
 name = "ark-feanor"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 resolver = "2"
 authors = ["Vitor Py <vitor@vitorpy.com>"]
@@ -20,7 +20,7 @@ ark-bls12-381 = { version = "0.4", default-features = false, features = ["std", 
 ark-std = { version = "0.4", default-features = false, features = ["std"] }
 
 # Existing dependencies
-feanor-math = { path = "vendor/feanor-math", features = ["unstable-enable"] }
+feanor-math = "3.5.9"
 num-bigint = "0.4"
 num-traits = "0.2"
 lazy_static = "1.4"
@@ -39,18 +39,9 @@ std = ["ark-ff/std", "ark-ec/std", "ark-serialize/std", "ark-bn254/std", "ark-bl
 name = "comparison"
 harness = false
 
-[[bench]]
-name = "buchberger_baseline"
-harness = false
-
 # Microbenchmarks: Field operations
 [[bench]]
 name = "field_ops"
-harness = false
-
-# Tiny problem benchmarks: Buchberger
-[[bench]]
-name = "buchberger_tiny"
 harness = false
 
 # Tiny problem benchmarks: F4
@@ -63,6 +54,3 @@ opt-level = 3
 lto = true
 codegen-units = 1
 debug = true
-
-[patch.crates-io]
-feanor-math = { path = "vendor/feanor-math" }

@@ -17,7 +17,7 @@ use ark_feanor::f4::f4_simple;
 use ark_bn254::Fr as BnFr;
 use feanor_math::homomorphism::Homomorphism;
 use feanor_math::rings::multivariate::{DegRevLex};
-use feanor_math::rings::multivariate::multivariate_impl::{DegreeCfg, MultivariatePolyRingImpl};
+use feanor_math::rings::multivariate::multivariate_impl::MultivariatePolyRingImpl;
 use feanor_math::ring::RingStore;
 use std::alloc::Global;
 use std::time::Duration;
@@ -123,12 +123,9 @@ fn bench_f4_cyclic3(c: &mut Criterion) {
 
     let field = &*BN254_FR;
     let n_vars = 3;
-    let degree_cfg = DegreeCfg::new(100).with_precompute(50);
 
     group.bench_function("cyclic3_degrevlex", |b| {
-        let poly_ring = MultivariatePolyRingImpl::new_with_mult_table_ex(
-            field, n_vars, degree_cfg, (0, 0), Global
-        );
+        let poly_ring = MultivariatePolyRingImpl::new(field, n_vars);
 
         b.iter(|| {
             let system = create_cyclic_system(&poly_ring, n_vars);
@@ -152,12 +149,9 @@ fn bench_f4_cyclic4(c: &mut Criterion) {
 
     let field = &*BN254_FR;
     let n_vars = 4;
-    let degree_cfg = DegreeCfg::new(200).with_precompute(50);
 
     group.bench_function("cyclic4_degrevlex", |b| {
-        let poly_ring = MultivariatePolyRingImpl::new_with_mult_table_ex(
-            field, n_vars, degree_cfg, (0, 0), Global
-        );
+        let poly_ring = MultivariatePolyRingImpl::new(field, n_vars);
 
         b.iter(|| {
             let system = create_cyclic_system(&poly_ring, n_vars);
@@ -181,12 +175,9 @@ fn bench_f4_katsura3(c: &mut Criterion) {
 
     let field = &*BN254_FR;
     let n_vars = 3;
-    let degree_cfg = DegreeCfg::new(50).with_precompute(30);
 
     group.bench_function("katsura3_degrevlex", |b| {
-        let poly_ring = MultivariatePolyRingImpl::new_with_mult_table_ex(
-            field, n_vars, degree_cfg, (0, 0), Global
-        );
+        let poly_ring = MultivariatePolyRingImpl::new(field, n_vars);
 
         b.iter(|| {
             let system = create_katsura_system(&poly_ring, n_vars);
@@ -210,12 +201,9 @@ fn bench_f4_katsura4(c: &mut Criterion) {
 
     let field = &*BN254_FR;
     let n_vars = 4;
-    let degree_cfg = DegreeCfg::new(100).with_precompute(30);
 
     group.bench_function("katsura4_degrevlex", |b| {
-        let poly_ring = MultivariatePolyRingImpl::new_with_mult_table_ex(
-            field, n_vars, degree_cfg, (0, 0), Global
-        );
+        let poly_ring = MultivariatePolyRingImpl::new(field, n_vars);
 
         b.iter(|| {
             let system = create_katsura_system(&poly_ring, n_vars);

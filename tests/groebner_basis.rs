@@ -3,13 +3,13 @@
 #![feature(allocator_api)]
 
 use ark_feanor::*;
+use ark_feanor::f4::f4_simple;
 use ark_bn254::Fr as BnFr;
 use ark_bls12_381::Fr as BlsFr;
 use ark_feanor::prime_field::FieldProperties;
 use feanor_math::homomorphism::Homomorphism;
-use feanor_math::algorithms::buchberger::buchberger_simple;
 use feanor_math::rings::multivariate::{DegRevLex, Lex};
-use feanor_math::rings::multivariate::multivariate_impl::{DegreeCfg, MultivariatePolyRingImpl};
+use feanor_math::rings::multivariate::multivariate_impl::MultivariatePolyRingImpl;
 use std::alloc::Global;
 
 #[test]
@@ -144,8 +144,7 @@ fn test_characteristic_field_operations() {
 #[test]
 fn test_groebner_basis_linear_system() {
     let field = &*BN254_FR;
-    let degree_cfg = DegreeCfg::new(64).with_precompute(1);
-    let poly_ring = MultivariatePolyRingImpl::new_with_mult_table_ex(field, 2, degree_cfg, (1, 1), Global);
+    let poly_ring = MultivariatePolyRingImpl::new(field, 2);
 
     // System: x + y = 0, x - y = 0
     // Solution: x = 0, y = 0
@@ -156,7 +155,7 @@ fn test_groebner_basis_linear_system() {
         ]
     });
 
-    let gb = buchberger_simple(&poly_ring, vec![p1, p2], DegRevLex);
+    let gb = f4_simple(&poly_ring, vec![p1, p2], DegRevLex);
 
     // Gröbner basis should not be empty
     assert!(!gb.is_empty(), "Gröbner basis should not be empty");
@@ -170,8 +169,7 @@ fn test_groebner_basis_linear_system() {
 #[test]
 fn test_groebner_basis_with_lex_ordering() {
     let field = &*BLS12_381_FR;
-    let degree_cfg = DegreeCfg::new(64).with_precompute(1);
-    let poly_ring = MultivariatePolyRingImpl::new_with_mult_table_ex(field, 2, degree_cfg, (1, 1), Global);
+    let poly_ring = MultivariatePolyRingImpl::new(field, 2);
 
     // Simple system: xy - 1, x^2 - 1
     let [p1, p2] = poly_ring.with_wrapped_indeterminates(|[x, y]| {
@@ -181,7 +179,7 @@ fn test_groebner_basis_with_lex_ordering() {
         ]
     });
 
-    let gb = buchberger_simple(&poly_ring, vec![p1, p2], Lex);
+    let gb = f4_simple(&poly_ring, vec![p1, p2], Lex);
 
     assert!(!gb.is_empty(), "Gröbner basis should not be empty");
 
@@ -202,7 +200,7 @@ fn test_groebner_basis_ideal_membership() {
         ]
     });
 
-    let gb = buchberger_simple(&poly_ring, vec![p1, p2], DegRevLex);
+    let gb = f4_simple(&poly_ring, vec![p1, p2], DegRevLex);
 
     assert!(!gb.is_empty());
 
@@ -216,8 +214,7 @@ fn test_groebner_basis_ideal_membership() {
 #[test]
 fn test_groebner_basis_triangular_system() {
     let field = &*BLS12_381_FR;
-    let degree_cfg = DegreeCfg::new(64).with_precompute(1);
-    let poly_ring = MultivariatePolyRingImpl::new_with_mult_table_ex(field, 3, degree_cfg, (1, 1), Global);
+    let poly_ring = MultivariatePolyRingImpl::new(field, 3);
 
     // Triangular system: x + y + z, xy, xz
     let [p1, p2, p3] = poly_ring.with_wrapped_indeterminates(|[x, y, z]| {
@@ -228,7 +225,7 @@ fn test_groebner_basis_triangular_system() {
         ]
     });
 
-    let gb = buchberger_simple(&poly_ring, vec![p1, p2, p3], DegRevLex);
+    let gb = f4_simple(&poly_ring, vec![p1, p2, p3], DegRevLex);
 
     assert!(!gb.is_empty());
     println!("Triangular system Gröbner basis has {} elements", gb.len());
@@ -237,15 +234,14 @@ fn test_groebner_basis_triangular_system() {
 #[test]
 fn test_groebner_basis_difference_of_squares() {
     let field = &*BN254_FR;
-    let degree_cfg = DegreeCfg::new(64).with_precompute(1);
-    let poly_ring = MultivariatePolyRingImpl::new_with_mult_table_ex(field, 2, degree_cfg, (1, 1), Global);
+    let poly_ring = MultivariatePolyRingImpl::new(field, 2);
 
     // System: x^2 - y^2
     let [input] = poly_ring.with_wrapped_indeterminates(|[x, y]| {
         [x.clone().pow(2) - y.clone().pow(2)]
     });
 
-    let gb = buchberger_simple(&poly_ring, vec![input], DegRevLex);
+    let gb = f4_simple(&poly_ring, vec![input], DegRevLex);
 
     // For a single polynomial, the Gröbner basis is essentially itself (up to scaling)
     assert_eq!(gb.len(), 1, "Single polynomial should have basis of size 1");
@@ -254,8 +250,7 @@ fn test_groebner_basis_difference_of_squares() {
 #[test]
 fn test_groebner_basis_comparison_orderings() {
     let field = &*BLS12_381_FR;
-    let degree_cfg = DegreeCfg::new(64).with_precompute(1);
-    let poly_ring = MultivariatePolyRingImpl::new_with_mult_table_ex(field, 2, degree_cfg, (1, 1), Global);
+    let poly_ring = MultivariatePolyRingImpl::new(field, 2);
 
     let [p1, p2] = poly_ring.with_wrapped_indeterminates(|[x, y]| {
         [
@@ -265,13 +260,13 @@ fn test_groebner_basis_comparison_orderings() {
     });
 
     // Compute with DegRevLex
-    let gb_degrevlex = buchberger_simple(&poly_ring, vec![
+    let gb_degrevlex = f4_simple(&poly_ring, vec![
         poly_ring.clone_el(&p1),
         poly_ring.clone_el(&p2)
     ], DegRevLex);
 
     // Compute with Lex
-    let gb_lex = buchberger_simple(&poly_ring, vec![p1, p2], Lex);
+    let gb_lex = f4_simple(&poly_ring, vec![p1, p2], Lex);
 
     // Both should be non-empty
     assert!(!gb_degrevlex.is_empty());
@@ -285,8 +280,7 @@ fn test_groebner_basis_comparison_orderings() {
 #[test]
 fn test_groebner_basis_homogeneous_ideal() {
     let field = &*BN254_FR;
-    let degree_cfg = DegreeCfg::new(64).with_precompute(1);
-    let poly_ring = MultivariatePolyRingImpl::new_with_mult_table_ex(field, 3, degree_cfg, (1, 1), Global);
+    let poly_ring = MultivariatePolyRingImpl::new(field, 3);
 
     // Homogeneous ideal: x^2, xy, xz
     let [p1, p2, p3] = poly_ring.with_wrapped_indeterminates(|[x, y, z]| {
@@ -297,7 +291,7 @@ fn test_groebner_basis_homogeneous_ideal() {
         ]
     });
 
-    let gb = buchberger_simple(&poly_ring, vec![p1, p2, p3], DegRevLex);
+    let gb = f4_simple(&poly_ring, vec![p1, p2, p3], DegRevLex);
 
     assert!(!gb.is_empty());
 

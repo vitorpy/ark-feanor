@@ -83,7 +83,7 @@ dependencies = [
 
 [[package]]
 name = "ark-feanor"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "ark-bls12-381",
  "ark-bn254",
@@ -394,7 +394,9 @@ checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 
 [[package]]
 name = "feanor-math"
-version = "3.6.0"
+version = "3.5.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5956a636f221a058fc28475b03aeea5ef67184059a3c39b47e59a814aee48777"
 dependencies = [
  "append-only-vec",
  "atomicbox",

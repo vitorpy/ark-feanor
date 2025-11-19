@@ -22,7 +22,7 @@ A bridge between [arkworks](https://github.com/arkworks-rs)' finite field types 
 - **Prime field specialization**: Division and field operations for `PrimeField` types
 - **Pre-configured fields**: Ready-to-use wrappers for BN254 and BLS12-381
 - **Polynomial support**: Create and manipulate univariate and multivariate polynomials
-- **Gröbner basis computation**: Solve polynomial systems using Buchberger's algorithm
+- **Gröbner basis computation**: Solve polynomial systems using the F4 algorithm
 
 ## Installation
 
@@ -77,11 +77,11 @@ let poly = poly_ring.from_terms([
 let result = poly_ring.evaluate(&poly, &field.int_hom().map(5), &field.identity());
 ```
 
-### Gröbner Basis Computation
+### Gröbner Basis Computation with F4
 
 ```rust
 use ark_feanor::*;
-use feanor_math::algorithms::buchberger::*;
+use ark_feanor::f4::*;
 use feanor_math::rings::multivariate::*;
 
 // Create multivariate ring BN254_Fr[x, y]
@@ -98,8 +98,8 @@ let system = poly_ring.with_wrapped_indeterminates(|[x, y]| {
     ]
 });
 
-// Compute Gröbner basis
-let gb = buchberger(&poly_ring, system, DegRevLex, |_| {})?;
+// Compute Gröbner basis using F4
+let gb = f4_simple(&poly_ring, system, DegRevLex);
 println!("Basis has {} polynomials", gb.len());
 ```
 
