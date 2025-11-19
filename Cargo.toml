@@ -1,6 +1,6 @@
 [package]
 name = "ark-feanor"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 resolver = "2"
 authors = ["Vitor Py <vitor@vitorpy.com>"]
@@ -12,12 +12,12 @@ categories = ["cryptography", "mathematics"]
 
 [dependencies]
 # Using upstream ark-algebra
-ark-ff = { version = "0.4", default-features = false, features = ["std"] }
-ark-ec = { version = "0.4", default-features = false, features = ["std"] }
-ark-serialize = { version = "0.4", default-features = false, features = ["std"] }
-ark-bn254 = { version = "0.4", default-features = false, features = ["std", "curve", "scalar_field"] }
-ark-bls12-381 = { version = "0.4", default-features = false, features = ["std", "curve", "scalar_field"] }
-ark-std = { version = "0.4", default-features = false, features = ["std"] }
+ark-ff = { version = "0.5", default-features = false, features = ["std"] }
+ark-ec = { version = "0.5", default-features = false, features = ["std"] }
+ark-serialize = { version = "0.5", default-features = false, features = ["std"] }
+ark-bn254 = { version = "0.5", default-features = false, features = ["std", "curve", "scalar_field"] }
+ark-bls12-381 = { version = "0.5", default-features = false, features = ["std", "curve", "scalar_field"] }
+ark-std = { version = "0.5", default-features = false, features = ["std"] }
 
 # Existing dependencies
 feanor-math = "3.5.9"
@@ -27,7 +27,7 @@ lazy_static = "1.4"
 
 [dev-dependencies]
 criterion = "0.5"
-ark-test-curves = { version = "0.4", default-features = false }
+ark-test-curves = { version = "0.5", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
