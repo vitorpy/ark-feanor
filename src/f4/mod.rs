@@ -61,25 +61,6 @@ use feanor_math::rings::multivariate::*;
 use std::time::{Duration, Instant};
 use std::collections::{HashMap, HashSet};
 
-/// Execution mode for parallelization
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ExecutionMode {
-    /// Deterministic mode: serialize pivot discovery for reproducibility
-    /// Ensures bit-exact results across runs with same thread count
-    Deterministic,
-
-    /// Performance mode: allow relaxed ordering with row_idx tie-breaking
-    /// May have non-deterministic pivot selection order, but correct results
-    Performance,
-}
-
-impl Default for ExecutionMode {
-    fn default() -> Self {
-        // Default to Deterministic for tests and reproducibility
-        ExecutionMode::Deterministic
-    }
-}
-
 /// Configuration for F4 algorithm
 #[derive(Clone, Debug)]
 pub struct F4Config {
@@ -97,12 +78,6 @@ pub struct F4Config {
 
     /// Optional cap on number of S-pairs processed per round (mnsel-like)
     pub s_pair_round_cap: Option<usize>,
-
-    /// Execution mode for parallelization
-    pub execution_mode: ExecutionMode,
-
-    /// Number of threads to use (None = use all available cores)
-    pub num_threads: Option<usize>,
 }
 
 impl F4Config {
@@ -114,8 +89,6 @@ impl F4Config {
             s_pair_budget: None,
             time_budget: None,
             s_pair_round_cap: None,
-            execution_mode: ExecutionMode::default(),
-            num_threads: None,
         }
     }
 
@@ -225,13 +198,6 @@ where
 {
     f4_configured(ring, input_basis, order, F4Config::default()).unwrap()
 }
-
-/// Parallel variant of f4_simple with Send + Sync bounds
-///
-/// Uses parallel AB phase reduction via reduce_tr_by_rr_on_A_par with snapshot-based
-/// approach. Requires thread-safe ring types (BN254, BLS12-381, etc.).
-///
-/// Expected speedup: 1.5-2x on 8+ cores for larger systems (Katsura-5+).
 
 /// Compute Gröbner basis using F4 algorithm with configuration
 pub fn f4_configured<P, O>(

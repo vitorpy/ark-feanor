@@ -1,15 +1,10 @@
-# Build configuration for AVX512 IFMA support
-# AMD Ryzen 5 7640U (Zen 4) - supports AVX512F, AVX512IFMA
+# Build configuration for optimal performance
 
 [build]
-# Use native CPU features for optimal performance
+# Use native CPU features for best performance
 rustflags = ["-C", "target-cpu=native"]
 
 [target.x86_64-unknown-linux-gnu]
-# Alternative: explicit Zen 4 targeting
-# rustflags = ["-C", "target-cpu=znver4"]
-# Or explicit feature flags:
-# rustflags = ["-C", "target-feature=+avx512f,+avx512ifma,+avx512dq,+avx512bw,+avx512vl"]
 rustflags = ["-C", "target-cpu=native"]
 
 # For benchmarks, use aggressive optimizations

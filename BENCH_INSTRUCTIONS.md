@@ -1,32 +1,27 @@
-# Benchmark Instructions: Buchberger vs F4 with AVX512 IFMA
+# Benchmark Instructions: Buchberger vs F4
 
-This document provides instructions for running and comparing the Buchberger baseline with the F4 algorithm using AVX512 IFMA optimizations.
+This document provides instructions for running and comparing the Buchberger baseline with the F4 algorithm.
 
 ## Prerequisites
 
-### Hardware Requirements
-- **CPU**: AMD Ryzen 5 7640U (Zen 4) or any CPU with AVX512F, AVX512DQ, and AVX512IFMA support
-- **Verification**: Check CPU features with `grep avx512_ifma /proc/cpuinfo`
-
 ### Software Setup
 - Rust toolchain (edition 2021+)
-- Forked ark-algebra with AVX512 IFMA support at `../ark-algebra`
 - feanor-math at `vendor/feanor-math`
 
 ## Build Configuration
 
-The project is configured to use AVX512 IFMA via `.cargo/config.toml`:
+The project is configured for optimal performance in release mode with LTO:
 
 ```toml
-[build]
-rustflags = ["-C", "target-cpu=native"]
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
 ```
-
-This enables all CPU features including AVX512 IFMA on supported hardware.
 
 ## Running Benchmarks
 
-### 1. Buchberger Baseline (No AVX512 modifications)
+### 1. Buchberger Baseline
 
 ```bash
 # Run Buchberger baseline benchmarks
@@ -41,27 +36,29 @@ ls -lh target/criterion/buchberger_*
 - `katsura9_degrevlex`: Katsura-9 system (9 variables, dense)
 - `cyclic_scaling`: Cyclic-5, Cyclic-6, Cyclic-7 for scaling analysis
 
-### 2. F4 with AVX512 IFMA
+### 2. Comparison Benchmarks
 
 ```bash
-# Run F4 benchmarks with AVX512 IFMA enabled
-cargo bench --bench f4_avx512 --features avx512,avx512-ifma
+# Run comparison benchmarks (F4 vs Buchberger)
+cargo bench --bench comparison
 
 # View results
-ls -lh target/criterion/f4_*
+ls -lh target/criterion/
 ```
 
-**Test Systems:** (Same as Buchberger for direct comparison)
-- `cyclic7_degrevlex_avx512`: Cyclic-7 with AVX512
-- `katsura9_degrevlex_avx512`: Katsura-9 with AVX512
-- `cyclic_scaling`: Cyclic-5, 6, 7 with AVX512
-
-### 3. Run Both Sequentially
+### 3. Field Operation Benchmarks
 
 ```bash
-# Run all benchmarks in sequence
-cargo bench --bench buchberger_baseline && \
-cargo bench --bench f4_avx512 --features avx512,avx512-ifma
+# Run field operation microbenchmarks
+cargo bench --bench field_ops
+```
+
+### 4. Tiny Problem Benchmarks
+
+```bash
+# Run small test problems
+cargo bench --bench buchberger_tiny
+cargo bench --bench f4_tiny
 ```
 
 ## Benchmark Configuration
@@ -72,7 +69,7 @@ cargo bench --bench f4_avx512 --features avx512,avx512-ifma
 - **Warmup**: 3 seconds (Criterion default)
 
 ### Polynomial System Configuration
-- **Field**: BN254 Fr (256-bit prime field, 4 limbs - optimal for AVX512 IFMA)
+- **Field**: BN254 Fr (256-bit prime field)
 - **Degree configuration**:
   - Cyclic/Scaling tests: `DegreeCfg::new(20).with_precompute(10)`
   - Katsura tests: `DegreeCfg::new(15).with_precompute(10)`
@@ -112,7 +109,6 @@ target/criterion/
 │       └── report/
 │           └── index.html
 ├── f4_cyclic7/
-│   └── cyclic7_degrevlex_avx512/
 └── ...
 ```
 
@@ -122,13 +118,6 @@ target/criterion/
 2. **Throughput**: Iterations per second (if applicable)
 3. **Variance**: Consistency of performance
 
-### Expected Performance
-
-Based on ark-algebra AVX512 IFMA documentation:
-- **Field multiplication speedup**: ~3.0x (per operation)
-- **F4 algorithm benefit**: Batch matrix reduction makes heavy use of field operations
-- **Overall speedup**: Depends on proportion of time spent in field arithmetic vs bookkeeping
-
 ### Viewing Results
 
 ```bash
@@ -137,7 +126,6 @@ firefox target/criterion/buchberger_cyclic7/cyclic7_degrevlex/report/index.html
 
 # Compare raw timing data
 cat target/criterion/buchberger_cyclic7/cyclic7_degrevlex/base/estimates.json
-cat target/criterion/f4_cyclic7/cyclic7_degrevlex_avx512/base/estimates.json
 ```
 
 ## Troubleshooting
@@ -159,16 +147,6 @@ Large polynomial systems may require significant memory:
 
 If running out of memory, reduce degree limits or use smaller systems.
 
-### AVX512 Not Enabled
-Verify AVX512 features are being used:
-```bash
-# Check if AVX512 instructions are in binary
-objdump -d target/release/deps/f4_avx512-* | grep vpmadd52
-
-# Verify CPU supports IFMA
-grep avx512_ifma /proc/cpuinfo
-```
-
 ## Comparison Analysis
 
 ### Manual Comparison
@@ -179,11 +157,11 @@ Extract timing data and compute speedup:
 jq '.mean.point_estimate' \
   target/criterion/buchberger_cyclic7/cyclic7_degrevlex/base/estimates.json
 
-# F4 + AVX512 Cyclic-7 time
+# F4 Cyclic-7 time
 jq '.mean.point_estimate' \
-  target/criterion/f4_cyclic7/cyclic7_degrevlex_avx512/base/estimates.json
+  target/criterion/f4_cyclic7/cyclic7_degrevlex/base/estimates.json
 
-# Compute speedup: buchberger_time / f4_avx512_time
+# Compute speedup: buchberger_time / f4_time
 ```
 
 ### Automated Analysis Script (Optional)
@@ -192,10 +170,10 @@ Create `compare_benchmarks.sh`:
 ```bash
 #!/bin/bash
 BUCH_TIME=$(jq -r '.mean.point_estimate' target/criterion/buchberger_cyclic7/cyclic7_degrevlex/base/estimates.json)
-F4_TIME=$(jq -r '.mean.point_estimate' target/criterion/f4_cyclic7/cyclic7_degrevlex_avx512/base/estimates.json)
+F4_TIME=$(jq -r '.mean.point_estimate' target/criterion/f4_cyclic7/cyclic7_degrevlex/base/estimates.json)
 
 echo "Buchberger Cyclic-7: ${BUCH_TIME}ns"
-echo "F4 + AVX512 Cyclic-7: ${F4_TIME}ns"
+echo "F4 Cyclic-7: ${F4_TIME}ns"
 echo "Speedup: $(echo "scale=2; $BUCH_TIME / $F4_TIME" | bc)x"
 ```
 
@@ -206,11 +184,10 @@ After collecting benchmark data:
 1. **Document findings**: Create performance comparison table
 2. **Verify correctness**: Both algorithms should produce equivalent Gröbner bases
 3. **Profile**: Use `perf` or `cargo flamegraph` to identify hotspots
-4. **Optimize**: If speedup is less than expected, investigate AVX512 utilization
+4. **Optimize**: Investigate further optimization opportunities in F4 algorithm
 
 ## References
 
-- **ark-algebra AVX512 IFMA Guide**: `../ark-algebra/ff/doc/AVX512_GUIDE.md`
 - **Criterion.rs Documentation**: https://bheisler.github.io/criterion.rs/
 - **F4 Algorithm**: Faugère, J.C. (1999). A new efficient algorithm for computing Gröbner bases (F4)
 
