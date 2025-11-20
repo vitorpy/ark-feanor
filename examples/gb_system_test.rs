@@ -121,9 +121,20 @@ fn main() {
     let field = &*BN254_FR;
 
     let n_vars = system.ring_config.n_vars;
+    let max_degree = system.ring_config.max_degree;
+    let mult_table = system.ring_config.mult_table;
 
-    let poly_ring = MultivariatePolyRingImpl::new(field, n_vars);
+    // Use the serialized configuration to avoid overflow on large systems
+    // (e.g., AMM has 1142 vars but only degree 2 polynomials)
+    let poly_ring = MultivariatePolyRingImpl::new_with_mult_table(
+        field,
+        n_vars,
+        max_degree as u16,
+        (mult_table.0 as u16, mult_table.1 as u16),
+        Global,
+    );
     println!("  Created in {:?}", start.elapsed());
+    println!("  Configured max_degree: {} (for {} vars)", max_degree, n_vars);
     println!();
 
     // Step 3: Build polynomial system from R1CS matrices

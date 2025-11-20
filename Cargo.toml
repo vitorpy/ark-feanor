@@ -1,6 +1,6 @@
 [package]
 name = "ark-feanor"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2021"
 resolver = "2"
 authors = ["Vitor Py <vitor@vitorpy.com>"]
@@ -20,7 +20,7 @@ ark-bls12-381 = { version = "0.5", default-features = false, features = ["std", 
 ark-std = { version = "0.5", default-features = false, features = ["std"] }
 
 # Existing dependencies
-feanor-math = "3.5.9"
+feanor-math = { version = "3.5.9", features = ["unstable-enable"] }
 num-bigint = "0.4"
 num-traits = "0.2"
 lazy_static = "1.4"
